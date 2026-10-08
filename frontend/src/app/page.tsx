@@ -99,6 +99,17 @@ function RegionTrack({ data }: { data: unknown }) {
   const features = Array.isArray(record.features) ? record.features as Record<string, unknown>[] : [];
   if (!region || !Number.isFinite(region.start) || !Number.isFinite(region.end)) return null;
   const start = Number(region.start); const end = Number(region.end); const span = Math.max(1, end - start);
+  if (typeof record.source === "string" && record.source.toLowerCase().includes("encode")) {
+    const payload = record.encode;
+    const payloadObject = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : null;
+    const records = Array.isArray(payload)
+      ? payload
+      : ["@graph", "results", "items"].map((key) => payloadObject?.[key]).find(Array.isArray) as unknown[] | undefined;
+    const total = records?.length ?? (typeof payloadObject?.total === "number" ? payloadObject.total : null);
+    return <div className="scope-note"><b>ENCODE public region search</b><span>{total === null ? "ENCODE returned a response; record count is not exposed in the recognized response fields." : `ENCODE returned ${total.toLocaleString()} record${total === 1 ? "" : "s"} for ${region.chromosome}:${formatCoordinate(start)}–${formatCoordinate(end)} (GRCh38).`}</span><span>These are portal records, not per-feature spans or AlphaGenome predictions. Expand the raw response below to inspect returned metadata.</span>{typeof record.source_url === "string" && <span><a href={record.source_url} target="_blank" rel="noreferrer">Open the ENCODE query</a></span>}</div>;
+  }
   if (!features.length) return <div className="empty-state">Ensembl returned no gene or regulatory features in {region.chromosome}:{formatCoordinate(start)}–{formatCoordinate(end)} (GRCh38).</div>;
   return <div className="region-track-list"><p className="result-note">Ensembl annotations returned for {region.chromosome}:{formatCoordinate(start)}–{formatCoordinate(end)} (GRCh38). Each bar shows the feature’s genomic span within this interval. <a href={typeof record.source_url === "string" ? record.source_url : "https://rest.ensembl.org/"} target="_blank" rel="noreferrer">Source: Ensembl REST</a></p>{features.map((feature, index) => {
     const featureStart = Number(feature.start); const featureEnd = Number(feature.end);
