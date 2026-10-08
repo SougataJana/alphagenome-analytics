@@ -1,10 +1,17 @@
 """Read-only public evidence adapters. Every result carries its source."""
 
 from urllib.parse import quote
+from pathlib import Path
+import os
 
 import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(BACKEND_ROOT / ".env")
 
 
 class EvidenceProviderError(Exception):
@@ -253,30 +260,60 @@ class EvidenceService:
 
     def encode_region(self, chromosome: str, start: int, end: int) -> dict:
         if start < 1 or end <= start or end - start > 1_000_000:
-            raise ValueError("ENCODE regions must be ordered, positive, and no wider than 1 Mb.")
+            raise ValueError("SCREEN regions must be ordered, positive, and no wider than 1 Mb.")
         chrom = chromosome.removeprefix("chr")
-        params = {
-            "query": f"chr{chrom}:{start}-{end}",
-            "assembly": "GRCh38",
-            "format": "json",
-            "page": "1",
-            "limit": "100",
-            "expand": "0",
-            "interval": "intersects",
-        }
-        # ENCODE's public portal exposes its own region-search route. Do not
-        # point this at a user-hosted GDS: that service requires a separate
-        # deployment and indexed data.
-        response = self._get("https://www.encodeproject.org/region-search/", params, provider="ENCODE")
-        if "json" not in response.headers.get("content-type", "").lower():
+        if chrom.upper() not in {*(str(n) for n in range(1, 23)), "X", "Y", "M", "MT"}:
+            raise ValueError("Enter a human chromosome from chr1–chr22, chrX, chrY, or chrM.")
+        api_key = os.getenv("SCREEN_API_KEY", "").strip()
+        if not api_key:
             raise EvidenceProviderError(
-                "ENCODE region search did not return JSON. The public portal may be temporarily unavailable or may have changed its response."
+                "SCREEN region search is not configured. Add SCREEN_API_KEY to backend/.env locally or to the backend service environment in Render."
             )
+        query = f'''query RegionCcreSearch {{
+          cCRESCREENSearch(
+            assembly: "grch38"
+            coordinates: [{{ chromosome: "chr{chrom}", start: {start}, end: {end} }}]
+          ) {{
+            chrom start len pct ctcf_zscore dnase_zscore atac_zscore enhancer_zscore promoter_zscore
+            info {{ accession }}
+          }}
+        }}'''
+        url = "https://screen.api.wenglab.org/graphql"
+        try:
+            response = httpx.post(
+                url,
+                json={"query": query},
+                headers={**self.headers, "Authorization": f"Bearer {api_key}"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise EvidenceProviderError("SCREEN did not respond before the timeout. Please retry in a moment.") from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403}:
+                detail = "SCREEN rejected the API key. Check that SCREEN_API_KEY is current and active."
+            else:
+                detail = f"SCREEN returned HTTP {exc.response.status_code}. Please retry later."
+            raise EvidenceProviderError(detail) from exc
+        except httpx.RequestError as exc:
+            raise EvidenceProviderError("Could not connect to SCREEN. Please retry in a moment.") from exc
+        except ValueError as exc:
+            raise EvidenceProviderError("SCREEN returned a response that could not be read as JSON.") from exc
+        if not isinstance(payload, dict):
+            raise EvidenceProviderError("SCREEN returned an unexpected response format.")
+        if payload.get("errors"):
+            raise EvidenceProviderError("SCREEN could not complete this cCRE query. Check the interval and retry.")
+        data = payload.get("data")
+        ccres = data.get("cCRESCREENSearch", []) if isinstance(data, dict) else []
+        if not isinstance(ccres, list):
+            raise EvidenceProviderError("SCREEN returned an unexpected cCRE result format.")
         return {
             "region": {"chromosome": f"chr{chrom}", "start": start, "end": end, "assembly": "GRCh38"},
-            "encode": self._json(response, "ENCODE"),
-            "source": "ENCODE DCC public region-search API",
-            "source_url": str(response.url),
+            "ccres": ccres,
+            "screen": payload,
+            "source": "SCREEN GraphQL API (ENCODE Registry of cCREs)",
+            "source_url": url,
         }
 
     def synthesize_variant(self, chromosome: str, position: int, reference: str, alternate: str, rsid: str | None = None) -> dict:

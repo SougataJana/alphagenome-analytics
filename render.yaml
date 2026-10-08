@@ -18,6 +18,8 @@ services:
         value: https://alphagenome-analytics-ui.onrender.com,https://alphagenome-analytics.vercel.app
       - key: ALPHAGENOME_API_KEY
         sync: false
+      - key: SCREEN_API_KEY
+        sync: false
 
   - type: web
     name: alphagenome-analytics-ui
