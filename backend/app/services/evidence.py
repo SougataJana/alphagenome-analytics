@@ -4,6 +4,8 @@ from urllib.parse import quote
 
 import httpx
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 
 class EvidenceProviderError(Exception):
@@ -279,4 +281,97 @@ class EvidenceService:
             "encode": self._json(response, "ENCODE"),
             "source": "ENCODE DCC genomic-data-service region search",
             "source_url": str(response.url),
+        }
+
+    def synthesize_variant(self, chromosome: str, position: int, reference: str, alternate: str, rsid: str | None = None) -> dict:
+        """Gather independent provider records without inferring a consensus classification."""
+        calls = {
+            "Ensembl region": lambda: self.region(chromosome, max(1, position - 50_000), position + 50_000),
+            "gnomAD": lambda: self.gnomad_variant(chromosome, position, reference, alternate),
+        }
+        if rsid:
+            if not rsid.lower().startswith("rs") or not rsid[2:].isdigit():
+                raise ValueError("Enter an rsID such as rs12345, or leave it blank.")
+            calls.update({
+                "Ensembl Variation": lambda: self.variant_evidence(rsid),
+                "GWAS Catalog": lambda: self.gwas_associations(rsid),
+                "ClinVar": lambda: self.clinvar(rsid),
+                "GTEx": lambda: self.gtex_eqtls(rsid),
+            })
+
+        providers: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(calls))) as pool:
+            futures = {pool.submit(call): name for name, call in calls.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    providers[name] = {"status": "complete", "retrieved_at": datetime.now(timezone.utc).isoformat(), "result": future.result()}
+                except (EvidenceProviderError, ValueError) as exc:
+                    providers[name] = {"status": "unavailable", "retrieved_at": datetime.now(timezone.utc).isoformat(), "error": str(exc)}
+
+        return {
+            "query": {"chromosome": chromosome, "position": position, "reference": reference, "alternate": alternate, "assembly": "GRCh38", "rsid": rsid.lower() if rsid else None},
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "providers": providers,
+            "interpretation": "Provider records are shown independently. An rsID query is not assumed to identify the supplied coordinates; verify variant mapping before combining them. No consensus or clinical classification is inferred.",
+        }
+
+    def prioritize_variant_genes(self, chromosome: str, position: int, effects: list[dict], window: int = 100_000) -> dict:
+        if window < 1 or window > 1_000_000:
+            raise ValueError("Gene-prioritization window must be between 1 bp and 1 Mb.")
+        region = self.region(chromosome, max(1, position - window), position + window)
+        candidates: dict[str, dict] = {}
+        for feature in region["features"]:
+            if feature.get("feature_type") != "gene" and not str(feature.get("id", "")).startswith("ENSG"):
+                continue
+            symbol = feature.get("symbol") or feature.get("gene_id") or feature.get("id")
+            if not symbol:
+                continue
+            start, end = feature.get("start"), feature.get("end")
+            distance = 0 if isinstance(start, int) and isinstance(end, int) and start <= position <= end else (
+                min(abs(position - start), abs(position - end)) if isinstance(start, int) and isinstance(end, int) else None
+            )
+            candidates[str(symbol).casefold()] = {
+                "gene": str(symbol), "ensembl_id": feature.get("id") or feature.get("gene_id"),
+                "start": start, "end": end, "distance_bp": distance,
+                "effect_count": 0, "modalities": [], "best_effect_quantile": None,
+            }
+
+        for effect in effects:
+            gene = effect.get("gene")
+            if not gene:
+                continue
+            key = str(gene).casefold()
+            candidate = candidates.setdefault(key, {
+                "gene": str(gene), "ensembl_id": None, "start": None, "end": None,
+                "distance_bp": None, "effect_count": 0, "modalities": [], "best_effect_quantile": None,
+            })
+            candidate["effect_count"] += 1
+            modality = effect.get("modality")
+            if modality and modality not in candidate["modalities"]:
+                candidate["modalities"].append(modality)
+            quantile = effect.get("quantile_score")
+            if isinstance(quantile, (int, float)):
+                current = candidate["best_effect_quantile"]
+                candidate["best_effect_quantile"] = max(current, quantile) if current is not None else quantile
+
+        max_effect_count = max((item["effect_count"] for item in candidates.values()), default=0)
+        rows = list(candidates.values())
+        for row in rows:
+            distance = row["distance_bp"]
+            row["proximity_component"] = max(0.0, 1.0 - distance / window) if distance is not None else None
+            row["alphagenome_support_component"] = row["effect_count"] / max_effect_count if max_effect_count else None
+            components = [value for value in (row["proximity_component"], row["alphagenome_support_component"]) if value is not None]
+            row["research_priority_score"] = sum(components) / len(components) if components else None
+            row["modalities"].sort()
+        rows.sort(key=lambda item: (item["research_priority_score"] is None, -(item["research_priority_score"] or 0), item["gene"].casefold()))
+        return {
+            "variant": {"chromosome": chromosome, "position": position, "assembly": "GRCh38"},
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "window_bp": window,
+            "method": "Equal-weight mean of available components: linear proximity (1 - distance/window) and AlphaGenome effect-record count normalized by the maximum count among returned candidates. Missing components are omitted.",
+            "candidates": rows,
+            "source": "Ensembl REST overlap/region plus submitted AlphaGenome Atlas effect records",
+            "source_url": region.get("source_url"),
+            "note": "Research prioritization heuristic, not a probability, causal-gene determination, or clinical classification. Candidates and scores depend on the returned Ensembl interval and AlphaGenome effect labels.",
         }

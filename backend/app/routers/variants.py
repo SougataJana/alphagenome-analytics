@@ -3,7 +3,7 @@ import os
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.models.variants import VariantAnalysisResult, VariantRequest
+from app.models.variants import ModalityEffect, VariantAnalysisResult, VariantRequest
 from app.services.alphagenome import (
     AlphaGenomeNotConfigured,
     AlphaGenomeRequestError,
@@ -44,6 +44,15 @@ class EnrichmentRequest(BaseModel):
     genes: list[str] = Field(min_length=1, max_length=5000)
     background: list[str] = Field(min_length=2, max_length=50000)
     gene_sets: dict[str, list[str]]
+
+
+class EvidenceSynthesisRequest(VariantRequest):
+    rsid: str | None = Field(default=None, pattern=r"^rs[0-9]+$")
+
+
+class VariantGeneRequest(VariantRequest):
+    effects: list[ModalityEffect] = Field(default_factory=list, max_length=5000)
+    window_bp: int = Field(default=100_000, ge=1, le=1_000_000)
 
 
 @router.post("/variants/analyze", response_model=VariantAnalysisResult)
@@ -148,6 +157,29 @@ def gnomad_evidence(chromosome: str, position: int, reference: str, alternate: s
 @router.get("/evidence/encode/region")
 def encode_region_evidence(chromosome: str, start: int, end: int) -> dict:
     return _evidence_call(evidence.encode_region, chromosome, start, end)
+
+
+@router.post("/evidence/synthesize")
+def synthesize_evidence(request: EvidenceSynthesisRequest) -> dict:
+    return _evidence_call(
+        evidence.synthesize_variant,
+        request.chromosome,
+        request.position,
+        request.reference,
+        request.alternate,
+        request.rsid,
+    )
+
+
+@router.post("/analysis/variant-to-gene")
+def variant_to_gene(request: VariantGeneRequest) -> dict:
+    return _evidence_call(
+        evidence.prioritize_variant_genes,
+        request.chromosome,
+        request.position,
+        [effect.model_dump() for effect in request.effects],
+        request.window_bp,
+    )
 
 
 @router.post("/statistics/compare")

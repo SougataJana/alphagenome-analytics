@@ -40,7 +40,7 @@ export type EvidenceAttachment = {
 };
 
 export type AnalysisStatistic = {
-  kind: "score_group_comparison" | "gene_set_enrichment";
+  kind: "score_group_comparison" | "gene_set_enrichment" | "tissue_comparison";
   created_at: string;
   input: unknown;
   data: unknown;
