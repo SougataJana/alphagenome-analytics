@@ -11,7 +11,7 @@ from app.services.alphagenome import (
 )
 from app.services import jobs
 from app.services.jobs import JobCapacityError
-from app.services.evidence import EvidenceProviderError, EvidenceProviderNotConfigured, EvidenceService
+from app.services.evidence import EvidenceProviderError, EvidenceService
 from app.services.store import get_analysis, list_analyses, save_analysis
 from app.services.statistics import compare_groups, gene_enrichment
 from datetime import datetime, timezone
@@ -113,8 +113,6 @@ def _evidence_call(callable_, *args):
         return callable_(*args)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except EvidenceProviderNotConfigured as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except EvidenceProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

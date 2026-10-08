@@ -43,9 +43,7 @@ The app includes single-variant prediction, effect review, AVI-based ranking, lo
 
 The AlphaGenome key is used only by the backend. Variant and region lookups send queries to the selected providers. VCF contents are parsed locally in the browser; variant coordinates are sent to AlphaGenome Atlas only after the user confirms. In public deployment mode, server-side analysis persistence is disabled and each visitor's history is kept in that visitor's browser. Local development keeps SQLite persistence enabled by default.
 
-The tool does not calculate clinical interpretations. It connects to Ensembl, GWAS Catalog, ClinVar, GTEx eQTL, and gnomAD lookups. ENCODE region search is available when `ENCODE_GDS_BASE_URL` points to an ENCODE-DCC genomic-data-service instance indexed for GRCh38; that separate service is not deployed by this project. No live genomic provider requests were made while implementing these workflows.
-
-To enable the optional ENCODE region lookup, add `ENCODE_GDS_BASE_URL=https://<your-gds-host>` to `backend/.env` and restart the backend. The service must expose the ENCODE DCC `/region-search/` endpoint with its GRCh38 interval index.
+The tool does not calculate clinical interpretations. It connects to Ensembl, GWAS Catalog, ClinVar, GTEx eQTL, gnomAD, and ENCODE's public region-search endpoint. ENCODE results are records returned for an interval; they are not AlphaGenome predictions and are not rendered as per-feature spans. This app does not require a separately hosted ENCODE genomic-data-service instance. No live genomic provider requests were made while implementing these workflows.
 
 ## Deploy to Render
 

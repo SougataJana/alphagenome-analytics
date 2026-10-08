@@ -3,16 +3,11 @@
 from urllib.parse import quote
 
 import httpx
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 
 class EvidenceProviderError(Exception):
-    pass
-
-
-class EvidenceProviderNotConfigured(EvidenceProviderError):
     pass
 
 
@@ -259,12 +254,6 @@ class EvidenceService:
     def encode_region(self, chromosome: str, start: int, end: int) -> dict:
         if start < 1 or end <= start or end - start > 1_000_000:
             raise ValueError("ENCODE regions must be ordered, positive, and no wider than 1 Mb.")
-        base_url = os.getenv("ENCODE_GDS_BASE_URL", "").rstrip("/")
-        if not base_url:
-            raise EvidenceProviderNotConfigured(
-                "ENCODE region lookup needs an ENCODE genomic-data-service base URL. "
-                "Set ENCODE_GDS_BASE_URL in backend/.env to a configured ENCODE-DCC genomic-data-service instance."
-            )
         chrom = chromosome.removeprefix("chr")
         params = {
             "query": f"chr{chrom}:{start}-{end}",
@@ -275,11 +264,18 @@ class EvidenceService:
             "expand": "0",
             "interval": "intersects",
         }
-        response = self._get(f"{base_url}/region-search/", params, provider="ENCODE")
+        # ENCODE's public portal exposes its own region-search route. Do not
+        # point this at a user-hosted GDS: that service requires a separate
+        # deployment and indexed data.
+        response = self._get("https://www.encodeproject.org/region-search/", params, provider="ENCODE")
+        if "json" not in response.headers.get("content-type", "").lower():
+            raise EvidenceProviderError(
+                "ENCODE region search did not return JSON. The public portal may be temporarily unavailable or may have changed its response."
+            )
         return {
             "region": {"chromosome": f"chr{chrom}", "start": start, "end": end, "assembly": "GRCh38"},
             "encode": self._json(response, "ENCODE"),
-            "source": "ENCODE DCC genomic-data-service region search",
+            "source": "ENCODE DCC public region-search API",
             "source_url": str(response.url),
         }
 

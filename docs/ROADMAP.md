@@ -21,14 +21,14 @@ The product makes AlphaGenome predictions searchable, interpretable, comparable,
 
 - Single-SNV AlphaGenome Atlas query and effect profile, including returned AVI, feature attribution, scorer rows, genes, tissues, and quantiles.
 - Local VCF parsing and background batch analysis (up to 5,000 GRCh38 SNVs per job), with explicit consent before coordinates are sent, job progress, raw AVI ranking, and a relative batch magnitude display.
-- Ensembl gene, region, and rsID lookups; GWAS Catalog association, ClinVar, and GTEx single-tissue eQTL lookups by rsID; gnomAD GRCh38 exome/genome allele-count lookup for a loaded SNV; optional ENCODE region search through a configured ENCODE-DCC genomic-data-service instance. Each response includes source information.
+- Ensembl gene, region, and rsID lookups; GWAS Catalog association, ClinVar, and GTEx single-tissue eQTL lookups by rsID; gnomAD GRCh38 exome/genome allele-count lookup for a loaded SNV; ENCODE public portal region search. Each response includes source information.
 - Tissue summaries, annotated prediction gene labels, a feature-to-gene co-occurrence view, score-group permutation/bootstrap analysis, and supplied gene-set enrichment with Benjamini-Hochberg correction.
 - Combined ranking can include pasted GWAS, GTEx, and gnomAD values with user-selected weights, within-dataset percentile normalization, and downloaded raw inputs/method. It does not auto-join those sources across batch variants.
 - Deterministic Ask AGA summaries over loaded results, JSON/HTML exports, and a local SQLite history of manifests/results.
 
 ### Data integrations and limitations
 
-- ENCODE search requires a configured `ENCODE_GDS_BASE_URL` pointing to an ENCODE-DCC genomic-data-service instance with the GRCh38 region index. The adapter is available but this project does not deploy or configure that separate service.
+- ENCODE region search calls the public ENCODE portal and is subject to its availability and request limits. It returns overlapping records, not a per-feature genomic annotation track. The current implementation has not been verified against a live ENCODE response.
 - GTEx eQTL and ClinVar are individual rsID lookups; they are not automatically merged into batch rankings. Combined ranking uses a user-provided keyed score table; ClinVar assertions are displayed separately.
 - The candidate-gene view reports AlphaGenome-returned labels and Ensembl locus annotations. It does not infer a causal target gene.
 - The network shows feature/gene co-occurrence from returned predictions, not experimentally established regulatory edges.
