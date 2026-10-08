@@ -15,7 +15,7 @@ services:
       - key: ANALYSIS_PERSISTENCE
         value: "false"
       - key: CORS_ORIGINS
-        value: https://alphagenome-analytics-ui.onrender.com
+        value: https://alphagenome-analytics-ui.onrender.com,https://alphagenome-analytics.vercel.app
       - key: ALPHAGENOME_API_KEY
         sync: false
 
