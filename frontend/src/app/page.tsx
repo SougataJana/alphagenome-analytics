@@ -24,6 +24,7 @@ function parseVariant(input: string): Variant | null {
   if (!match || Number(match[3]) < 1 || match[4].toUpperCase() === match[5].toUpperCase()) return null;
   return { chromosome: `chr${match[2].toUpperCase()}`, position: Number(match[3]), reference: match[4].toUpperCase(), alternate: match[5].toUpperCase(), genome_assembly: "GRCh38" };
 }
+const formatCoordinate = (value: number) => new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 function variantKey(variant?: Variant) { return variant ? `${variant.chromosome}:${variant.position} ${variant.reference}>${variant.alternate}` : ""; }
 function parseEvidenceScores(text: string): EvidenceScoreRow[] {
   return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"))
@@ -96,20 +97,25 @@ function RegionTrack({ data }: { data: unknown }) {
   const record = data as Record<string, unknown>;
   const region = record.region as { chromosome?: string; start?: number; end?: number } | undefined;
   const features = Array.isArray(record.features) ? record.features as Record<string, unknown>[] : [];
-  if (!region || !Number.isFinite(region.start) || !Number.isFinite(region.end) || !features.length) return null;
+  if (!region || !Number.isFinite(region.start) || !Number.isFinite(region.end)) return null;
   const start = Number(region.start); const end = Number(region.end); const span = Math.max(1, end - start);
-  return <div className="region-track-list"><p className="result-note">Ensembl annotations returned for {region.chromosome}:{start.toLocaleString()}–{end.toLocaleString()} (GRCh38). Each bar shows the feature’s genomic span within this interval.</p>{features.map((feature, index) => {
+  if (!features.length) return <div className="empty-state">Ensembl returned no gene or regulatory features in {region.chromosome}:{formatCoordinate(start)}–{formatCoordinate(end)} (GRCh38).</div>;
+  return <div className="region-track-list"><p className="result-note">Ensembl annotations returned for {region.chromosome}:{formatCoordinate(start)}–{formatCoordinate(end)} (GRCh38). Each bar shows the feature’s genomic span within this interval. <a href={typeof record.source_url === "string" ? record.source_url : "https://rest.ensembl.org/"} target="_blank" rel="noreferrer">Source: Ensembl REST</a></p>{features.map((feature, index) => {
     const featureStart = Number(feature.start); const featureEnd = Number(feature.end);
     if (!Number.isFinite(featureStart) || !Number.isFinite(featureEnd) || featureEnd < featureStart) return null;
-    const left = Math.max(0, Math.min(100, (featureStart - start) / span * 100));
-    const right = Math.max(left + 0.4, Math.min(100, (featureEnd - start) / span * 100));
-    return <details className="region-track-row" key={`${String(feature.id ?? feature.gene_id ?? "feature")}-${index}`}><summary><span>{String(feature.symbol ?? feature.gene_id ?? feature.id ?? "feature")}</span><i><b style={{ left: `${left}%`, width: `${Math.max(0.4, right - left)}%` }}/></i><small>{String(feature.feature_type ?? feature.biotype ?? "feature")}</small></summary><p>{String(featureStart.toLocaleString())}–{String(featureEnd.toLocaleString())} · strand {String(feature.strand ?? "not reported")} · {String(feature.source ?? "Ensembl")}</p></details>;
+    const clippedStart = Math.max(start, featureStart); const clippedEnd = Math.min(end, featureEnd);
+    if (clippedEnd < clippedStart) return null;
+    const left = (clippedStart - start) / span * 100;
+    const width = (clippedEnd - clippedStart) / span * 100;
+    const strand = feature.strand === 1 ? "+" : feature.strand === -1 ? "−" : "?";
+    return <details className="region-track-row" key={`${String(feature.id ?? feature.gene_id ?? "feature")}-${index}`}><summary><span>{String(feature.symbol ?? feature.gene_id ?? feature.id ?? "feature")}</span><i><b style={{ left: `${left}%`, width: `${width}%` }}/></i><small>{String(feature.feature_type ?? feature.biotype ?? "feature")} · {strand}</small></summary><p>{formatCoordinate(featureStart)}–{formatCoordinate(featureEnd)} · strand {strand} · {String(feature.source ?? "Ensembl")}</p></details>;
   })}</div>;
 }
 
 export default function Home() {
   const [view, setView] = useState<View>("explore");
   const [locusWidth, setLocusWidth] = useState(2000);
+  const [regionChromosome, setRegionChromosome] = useState(""); const [regionStart, setRegionStart] = useState(""); const [regionEnd, setRegionEnd] = useState("");
   const [query, setQuery] = useState(""); const [result, setResult] = useState<Result | null>(null);
   const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
   const [vcfVariants, setVcfVariants] = useState<Variant[]>([]); const [consent, setConsent] = useState(false); const [job, setJob] = useState<Job | null>(null);
@@ -127,6 +133,12 @@ export default function Home() {
     try { setHistory(JSON.parse(window.localStorage.getItem(historyStorageKey) ?? "[]") as HistoryEntry[]); }
     catch { setHistory([]); }
   }, []);
+  useEffect(() => {
+    if (!result?.variant) return;
+    setRegionChromosome(result.variant.chromosome);
+    setRegionStart(String(Math.max(1, result.variant.position - Math.floor(locusWidth / 2))));
+    setRegionEnd(String(result.variant.position + Math.floor(locusWidth / 2)));
+  }, [result, locusWidth]);
   function saveLocalHistory(entry: HistoryEntry) {
     setHistory((current) => {
       const updated = [entry, ...current.filter((item) => item.analysis_id !== entry.analysis_id)].slice(0, 50);
@@ -341,6 +353,14 @@ export default function Home() {
     }).filter((row) => row.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   }, [prioritized, result, evidenceScoreTsv, priorityWeights]);
 
+  function loadRegionAnnotations() {
+    const start = Number(regionStart); const end = Number(regionEnd);
+    if (!regionChromosome.trim() || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end <= start || end - start > 5_000_000) {
+      setMessage("Enter a chromosome and an ordered GRCh38 interval no wider than 5 Mb."); return;
+    }
+    lookup(`/api/v1/evidence/region?chromosome=${encodeURIComponent(regionChromosome.trim())}&start=${start}&end=${end}`);
+  }
+
   function answerQuestion() {
     const q = question.toLowerCase();
     if (!result) { setAnswer("Run a variant analysis or VCF batch first. Ask AGA answers from loaded results and does not generate biological claims independently."); return; }
@@ -433,8 +453,15 @@ export default function Home() {
       {view === "ask" && <><p className="workspace-copy">Ask AGA summarizes loaded results using deterministic rules; it does not make external model calls or invent biological explanations.</p><div className="question-chips">{["Summarize the variant impact", "Which genes are listed?", "Which tissues have the strongest scores?"].map((q)=><button key={q} onClick={()=>setQuestion(q)}>{q}</button>)}</div><form className="ask-form" onSubmit={(e)=>{e.preventDefault();answerQuestion();}}><input placeholder="Ask about the loaded result…" value={question} onChange={(e)=>setQuestion(e.target.value)}/><button>Ask</button></form>{answer && <div className="answer-panel">{answer}</div>}</>}
       {view === "reports" && <><p className="workspace-copy">Download portable JSON records or a readable HTML report. Analysis reports use a shared structure for inputs, AlphaGenome output, annotations, evidence, statistics, and provenance.</p><div className="action-row"><button className="primary-action" onClick={()=>download(`aga-workspace-${analysisResult?.analysis_id ?? batchAnalysisResult?.analysis_id ?? "session"}.json`,createWorkspaceReport())}>Download complete reproducibility bundle</button><button className="primary-action" onClick={()=>downloadHtml(`aga-workspace-${analysisResult?.analysis_id ?? "session"}.html`,"AlphaGenome Analytics research report",createWorkspaceReport())}>Download workspace HTML</button><button className="primary-action" disabled={!analysisResult} onClick={()=>analysisResult && downloadHtml(`aga-${analysisResult.analysis_id}.html`, "AlphaGenome Analytics research report", analysisResult)}>Download variant HTML report</button><button className="primary-action" disabled={!analysisResult} onClick={()=>analysisResult && download(`aga-${analysisResult.analysis_id}.json`, analysisResult)}>Download variant JSON</button><button className="primary-action" disabled={!batchAnalysisResult} onClick={()=>batchAnalysisResult && download(`aga-${batchAnalysisResult.analysis_id}.json`, batchAnalysisResult)}>Download batch JSON</button><button className="primary-action" disabled={!stats} onClick={()=>stats && download(`aga-statistics-${String(stats.analysis_id ?? "result")}.json`, stats)}>Download statistics JSON</button><button className="primary-action" disabled={!enrichment} onClick={()=>enrichment && download("aga-gene-enrichment.json", enrichment)}>Download enrichment JSON</button></div>{analysisResult && <div className="scope-note"><b>Analysis provenance</b><span>{analysisResult.alphagenome.provider} · GRCh38 · {analysisResult.created_at} · {analysisResult.alphagenome.sdk_version ?? "SDK version unavailable"} · Model version not exposed by Atlas</span>{analysisResult.evidence.map((entry,index)=><span key={`${entry.provider}-${index}`}>{entry.provider} · retrieved {new Date(entry.retrieved_at).toLocaleString()} · {entry.source_url ?? "source URL not returned"}</span>)}</div>}</>}
       {view === "reproducibility" && <><p className="workspace-copy">History is saved only in this browser. The public server does not keep a shared analysis history; clear this browser’s site data to remove these records.</p>{history.length ? <div className="history-list">{history.map((entry)=><div className="history-entry" key={entry.analysis_id}><button onClick={()=>restoreHistoryEntry(entry)}><b>{entry.analysis_type.replaceAll("_"," ")}</b><span>{entry.created_at} · {entry.status}</span><small>{entry.analysis_id}</small></button><details><summary>View input manifest</summary><pre className="answer-panel">{JSON.stringify(entry.manifest,null,2)}</pre></details></div>)}</div> : <div className="empty-state">No analysis records saved in this browser yet.</div>}</>}
-      {view === "region" && <><p className="workspace-copy">Query Ensembl gene and regulatory features for a GRCh38 interval (maximum width 5 Mb). Coordinates are sent to Ensembl when you run the lookup.</p>{result?.variant && <><div className="locus-toolbar"><span className="locus-coordinate">{result.variant.chromosome}:{Math.max(1,result.variant.position-Math.floor(locusWidth/2)).toLocaleString()}–{(result.variant.position+Math.floor(locusWidth/2)).toLocaleString()}</span><div><button onClick={()=>setLocusWidth((n)=>Math.min(1000000,n*2))}>−</button><button onClick={()=>setLocusWidth((n)=>Math.max(200,Math.floor(n/2)))}>+</button></div></div><div className="locus-view"><div className="coordinate-ticks"><span>{Math.max(1,result.variant.position-Math.floor(locusWidth/2)).toLocaleString()}</span><span>{result.variant.position.toLocaleString()}</span><span>{(result.variant.position+Math.floor(locusWidth/2)).toLocaleString()}</span></div><div className="locus-track"><div className="track-line"/><div className="variant-marker" style={{left:"50%"}}><i/><span>{result.variant.reference}→{result.variant.alternate}</span></div></div><div className="track-label">SELECTED VARIANT<span>{result.variant.position.toLocaleString()}</span></div></div></>}<div className="form-grid"><label>Chromosome<input id="region-chrom" placeholder={result?.variant?.chromosome ?? "chr7"}/></label><label>Start<input id="region-start" type="number" placeholder="1000000"/></label><label>End<input id="region-end" type="number" placeholder="1010000"/></label></div><button className="primary-action" onClick={()=>{const c=(document.getElementById("region-chrom") as HTMLInputElement).value;const s=(document.getElementById("region-start") as HTMLInputElement).value;const e=(document.getElementById("region-end") as HTMLInputElement).value;lookup(`/api/v1/evidence/region?chromosome=${encodeURIComponent(c)}&start=${s}&end=${e}`);}} disabled={busy}>Load region annotations</button><RegionTrack data={evidenceData}/>{evidenceData && <details><summary>View raw region response</summary><pre className="answer-panel">{JSON.stringify(evidenceData,null,2)}</pre></details>}</>}
-      {view === "region" && <button className="primary-action" onClick={()=>{const c=(document.getElementById("region-chrom") as HTMLInputElement).value;const s=(document.getElementById("region-start") as HTMLInputElement).value;const e=(document.getElementById("region-end") as HTMLInputElement).value;lookup(`/api/v1/evidence/encode/region?chromosome=${encodeURIComponent(c)}&start=${s}&end=${e}`);}} disabled={busy}>ENCODE region search · configured service</button>}
+      {view === "region" && <>
+        <p className="workspace-copy">Explore a GRCh38 interval using Ensembl gene and regulatory annotations. The interval, coordinate convention, source, and returned features are shown explicitly; this is a research browser, not a clinical interpretation.</p>
+        {result?.variant && <div className="locus-toolbar"><span className="locus-coordinate">Variant locator · {result.variant.chromosome}:{formatCoordinate(result.variant.position)} · GRCh38</span><div><button aria-label="Zoom out" onClick={()=>setLocusWidth((n)=>Math.min(1_000_000,n*2))}>−</button><button aria-label="Zoom in" onClick={()=>setLocusWidth((n)=>Math.max(200,Math.floor(n/2)))}>+</button></div></div>}
+        {result?.variant && <div className="locus-view"><div className="coordinate-ticks"><span>{formatCoordinate(Math.max(1,result.variant.position-Math.floor(locusWidth/2)))}</span><span>{formatCoordinate(result.variant.position)}</span><span>{formatCoordinate(result.variant.position+Math.floor(locusWidth/2))}</span></div><div className="locus-track"><div className="track-line"/><div className="variant-marker" style={{left:"50%"}}><i/><span>{result.variant.reference}→{result.variant.alternate}</span></div></div><div className="track-label">SELECTED VARIANT<span>{result.variant.chromosome}:{formatCoordinate(result.variant.position)}</span></div></div>}
+        <p className="result-note">The line above locates the selected SNV; it is not an annotation track. Load Ensembl annotations below to see genes and regulatory features returned for the interval.</p>
+        <div className="form-grid"><label>Chromosome<input value={regionChromosome} onChange={(e)=>setRegionChromosome(e.target.value)} placeholder="chr22"/></label><label>Start · 1-based<input type="number" min="1" value={regionStart} onChange={(e)=>setRegionStart(e.target.value)} placeholder="GRCh38 start"/></label><label>End · inclusive<input type="number" min="1" value={regionEnd} onChange={(e)=>setRegionEnd(e.target.value)} placeholder="GRCh38 end"/></label></div>
+        <div className="action-row"><button className="primary-action" onClick={loadRegionAnnotations} disabled={busy}>Load Ensembl annotations</button><button className="primary-action" onClick={()=>{const start=Number(regionStart),end=Number(regionEnd);if(!regionChromosome.trim()||!Number.isInteger(start)||!Number.isInteger(end)||start<1||end<=start||end-start>1_000_000){setMessage("ENCODE search needs an ordered interval no wider than 1 Mb.");return;}lookup(`/api/v1/evidence/encode/region?chromosome=${encodeURIComponent(regionChromosome.trim())}&start=${start}&end=${end}`);}} disabled={busy}>ENCODE region search</button></div>
+        <RegionTrack data={evidenceData}/>{evidenceData && <details><summary>View raw region response</summary><pre className="answer-panel">{JSON.stringify(evidenceData,null,2)}</pre></details>}
+      </>}
       {message && view !== "explore" && <p className="feedback visible" role="status">{message}</p>}
     </section>
     <footer><span>ALPHAGENOME ANALYTICS</span><span>Research predictions · Not for clinical decision-making</span></footer>
