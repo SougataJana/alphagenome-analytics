@@ -22,18 +22,43 @@ class EvidenceService:
             "User-Agent": "AlphaGenomeAnalytics/0.1 (research prototype)",
         }
 
-    def _get(self, url: str, params: dict | list[tuple[str, str]] | None = None) -> httpx.Response:
+    def _get(
+        self,
+        url: str,
+        params: dict | list[tuple[str, str]] | None = None,
+        *,
+        provider: str,
+    ) -> httpx.Response:
         try:
             response = httpx.get(url, params=params, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
             return response
-        except httpx.HTTPError as exc:
-            raise EvidenceProviderError("An evidence provider could not be reached.") from exc
+        except httpx.TimeoutException as exc:
+            raise EvidenceProviderError(
+                f"{provider} did not respond before the timeout. Please retry in a moment."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise EvidenceProviderError(
+                f"{provider} returned HTTP {exc.response.status_code}. Please retry later."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise EvidenceProviderError(
+                f"Could not connect to {provider}. Please retry in a moment."
+            ) from exc
+
+    @staticmethod
+    def _json(response: httpx.Response, provider: str) -> dict | list:
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise EvidenceProviderError(
+                f"{provider} returned a response that could not be read. Please retry later."
+            ) from exc
 
     def search_gene(self, symbol: str) -> dict:
         url = f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{quote(symbol, safe='')}"
-        response = self._get(url, {"expand": "1"})
-        gene = response.json()
+        response = self._get(url, {"expand": "1"}, provider="Ensembl")
+        gene = self._json(response, "Ensembl")
         if not isinstance(gene, dict) or not gene.get("id"):
             raise EvidenceProviderError("Ensembl did not resolve this gene symbol.")
         start = int(gene["start"])
@@ -65,9 +90,10 @@ class EvidenceService:
         response = self._get(
             url,
             [("feature", "gene"), ("feature", "regulatory")],
+            provider="Ensembl",
         )
         features = []
-        for item in response.json():
+        for item in self._json(response, "Ensembl"):
             features.append(
                 {
                     "id": item.get("id"),
@@ -91,8 +117,8 @@ class EvidenceService:
         if not rsid.lower().startswith("rs") or not rsid[2:].isdigit():
             raise ValueError("Enter an rsID such as rs12345.")
         url = f"https://rest.ensembl.org/variation/homo_sapiens/{quote(rsid.lower(), safe='')}"
-        response = self._get(url, {"phenotypes": "1", "pops": "1"})
-        data = response.json()
+        response = self._get(url, {"phenotypes": "1", "pops": "1"}, provider="Ensembl Variation")
+        data = self._json(response, "Ensembl Variation")
         return {
             "rsid": rsid.lower(),
             "mappings": data.get("mappings", []),
@@ -108,8 +134,9 @@ class EvidenceService:
         response = self._get(
             "https://www.ebi.ac.uk/gwas/rest/api/v2/associations",
             {"rs_id": rsid.lower(), "size": "100"},
+            provider="GWAS Catalog",
         )
-        payload = response.json()
+        payload = self._json(response, "GWAS Catalog")
         records = payload.get("_embedded", {}).get("associations", payload.get("associations", []))
         return {
             "rsid": rsid.lower(),
@@ -125,7 +152,9 @@ class EvidenceService:
         search = self._get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
             {"db": "clinvar", "term": term, "retmode": "json", "retmax": "20"},
-        ).json()
+            provider="NCBI ClinVar",
+        )
+        search = self._json(search, "NCBI ClinVar")
         ids = search.get("esearchresult", {}).get("idlist", [])
         summaries = {}
         summary_url = None
@@ -133,8 +162,9 @@ class EvidenceService:
             response = self._get(
                 "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
                 {"db": "clinvar", "id": ",".join(ids), "retmode": "json"},
+                provider="NCBI ClinVar",
             )
-            summaries = response.json().get("result", {})
+            summaries = self._json(response, "NCBI ClinVar").get("result", {})
             summary_url = str(response.url)
         return {
             "rsid": rsid.lower(),
@@ -151,11 +181,12 @@ class EvidenceService:
         response = self._get(
             "https://gtexportal.org/api/v2/association/singleTissueEqtl",
             {"snpId": rsid.lower(), "datasetId": "gtex_v10", "page": "0", "itemsPerPage": "100"},
+            provider="GTEx",
         )
         return {
             "rsid": rsid.lower(),
             "dataset": "gtex_v10",
-            "associations": response.json(),
+            "associations": self._json(response, "GTEx"),
             "source": "GTEx Portal API v2",
             "source_url": str(response.url),
         }
@@ -189,8 +220,22 @@ class EvidenceService:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise EvidenceProviderError("gnomAD could not be reached.") from exc
+        except httpx.TimeoutException as exc:
+            raise EvidenceProviderError(
+                "gnomAD did not respond before the timeout. Please retry in a moment."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise EvidenceProviderError(
+                f"gnomAD returned HTTP {exc.response.status_code}. Please retry later."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise EvidenceProviderError(
+                "Could not connect to gnomAD. Please retry in a moment."
+            ) from exc
+        except ValueError as exc:
+            raise EvidenceProviderError(
+                "gnomAD returned a response that could not be read. Please retry later."
+            ) from exc
         if payload.get("errors"):
             raise EvidenceProviderError("gnomAD returned a query error for this variant.")
         result = payload.get("data", {}).get("variant")
@@ -228,10 +273,10 @@ class EvidenceService:
             "expand": "0",
             "interval": "intersects",
         }
-        response = self._get(f"{base_url}/region-search/", params)
+        response = self._get(f"{base_url}/region-search/", params, provider="ENCODE")
         return {
             "region": {"chromosome": f"chr{chrom}", "start": start, "end": end, "assembly": "GRCh38"},
-            "encode": response.json(),
+            "encode": self._json(response, "ENCODE"),
             "source": "ENCODE DCC genomic-data-service region search",
             "source_url": str(response.url),
         }
