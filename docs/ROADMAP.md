@@ -30,7 +30,7 @@ The product makes AlphaGenome predictions searchable, interpretable, comparable,
 
 - SCREEN cCRE lookup calls the SCREEN GraphQL API and requires a configured API key. It returns overlapping registry records, not a per-feature experimental signal track. Empty results are valid provider responses and do not demonstrate biological absence.
 - GTEx eQTL and ClinVar are individual rsID lookups; they are not automatically merged into batch rankings. Combined ranking uses a user-provided keyed score table; ClinVar assertions are displayed separately.
-- The candidate-gene view reports AlphaGenome-returned labels and Ensembl locus annotations. It does not infer a causal target gene.
+- The candidate-gene view joins exact normalized gene symbols/Ensembl IDs and ranks mapped genes using an uncalibrated equal-weight distance + maximum RNA_SEQ quantile heuristic. Unmapped labels remain unscored; this does not infer a causal target gene.
 - The network shows feature/gene co-occurrence from returned predictions, not experimentally established regulatory edges.
 - The region view has a coordinate navigator and Ensembl annotations; richer prediction/evidence multi-track visualization remains planned. Batch plots show relative AVI magnitude and descriptive dominant-scorer groups, not statistical clustering or inferred mechanisms.
 - VCF parsing supports uncompressed SNVs only. Genotype columns are discarded by the browser parser. Variant coordinates are sent to the configured AlphaGenome Atlas service after consent; in local development, analysis records may be saved in SQLite.

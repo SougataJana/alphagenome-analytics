@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -77,6 +78,70 @@ class RegionValidationTests(unittest.TestCase):
             self.service.encode_region("chr8", 0, 100)
         with self.assertRaisesRegex(ValueError, "positive"):
             self.service.encode_region("chr8", 200, 100)
+
+
+class VariantToGeneScoringTests(unittest.TestCase):
+    def setUp(self):
+        self.service = EvidenceService()
+
+    def test_effect_strength_can_outrank_row_count(self):
+        features = [
+            {"id": "ENSG00000000001", "feature_type": "gene", "symbol": "GENEA", "start": 1500, "end": 1600},
+            {"id": "ENSG00000000002", "feature_type": "gene", "symbol": "GENEB", "start": 1900, "end": 1950},
+        ]
+        effects = [
+            {"gene": "GENEA", "modality": "RNA_SEQ", "quantile_score": 0.1}
+            for _ in range(12)
+        ] + [{"gene": "GENEB", "modality": "RNA_SEQ", "quantile_score": 0.9}]
+        with patch.object(self.service, "region", return_value={"features": features, "source_url": "source"}):
+            result = self.service.prioritize_variant_genes("chr1", 1000, effects, window=1000)
+        self.assertEqual(result["candidates"][0]["gene"], "GENEB")
+        by_gene = {row["gene"]: row for row in result["candidates"]}
+        self.assertGreater(by_gene["GENEA"]["effect_count"], by_gene["GENEB"]["effect_count"])
+        self.assertLess(by_gene["GENEA"]["research_priority_score"], by_gene["GENEB"]["research_priority_score"])
+
+    def test_unmapped_gene_with_missing_distance_is_unscored(self):
+        features = [
+            {"id": "ENSG00000000003", "feature_type": "gene", "symbol": "NEARBY", "start": 1000, "end": 1010},
+        ]
+        effects = [{"gene": "UNMAPPED", "modality": "RNA_SEQ", "quantile_score": 1.0}]
+        with patch.object(self.service, "region", return_value={"features": features, "source_url": "source"}):
+            result = self.service.prioritize_variant_genes("chr1", 1005, effects, window=1000)
+        by_gene = {row["gene"]: row for row in result["candidates"]}
+        self.assertEqual(by_gene["NEARBY"]["research_priority_score"], 0.5)
+        self.assertIsNone(by_gene["UNMAPPED"]["research_priority_score"])
+        self.assertIsNone(by_gene["UNMAPPED"]["rank"])
+
+    def test_symbol_and_versioned_ensembl_id_merge_to_one_candidate(self):
+        features = [
+            {"id": "ENSG00000141510", "feature_type": "gene", "symbol": "TP53", "start": 900, "end": 1100},
+        ]
+        effects = [
+            {"gene": "tp53", "modality": "RNA_SEQ", "quantile_score": 0.2},
+            {"gene": "ENSG00000141510.4", "modality": "RNA_SEQ", "quantile_score": 0.7},
+        ]
+        with patch.object(self.service, "region", return_value={"features": features, "source_url": "source"}):
+            result = self.service.prioritize_variant_genes("chr1", 1000, effects, window=1000)
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["gene"], "TP53")
+        self.assertEqual(candidate["effect_count"], 2)
+        self.assertEqual(candidate["best_effect_quantile"], 0.7)
+
+    def test_ambiguous_symbol_does_not_merge_effects_to_arbitrary_gene(self):
+        features = [
+            {"id": "ENSG00000000011", "feature_type": "gene", "symbol": "DUP", "start": 900, "end": 950},
+            {"id": "ENSG00000000012", "feature_type": "gene", "symbol": "DUP", "start": 1050, "end": 1100},
+        ]
+        effects = [{"gene": "DUP", "modality": "RNA_SEQ", "quantile_score": 0.9}]
+        with patch.object(self.service, "region", return_value={"features": features, "source_url": "source"}):
+            result = self.service.prioritize_variant_genes("chr1", 1000, effects, window=1000)
+        genes = [row for row in result["candidates"] if row["gene"] == "DUP"]
+        unmapped = [row for row in result["candidates"] if row["gene"] == "DUP" and row["ensembl_id"] is None]
+        self.assertEqual(len(genes), 3)
+        self.assertEqual(len(unmapped), 1)
+        self.assertIsNone(unmapped[0]["research_priority_score"])
+        self.assertIsNone(unmapped[0]["rank"])
 
 
 if __name__ == "__main__":

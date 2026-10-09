@@ -1,6 +1,7 @@
 """Read-only public evidence adapters. Every result carries its source."""
 
 from urllib.parse import quote
+import math
 
 from app.models.variants import GRCH38_CHROMOSOME_LENGTHS, normalize_grch38_chromosome
 from pathlib import Path
@@ -362,57 +363,96 @@ class EvidenceService:
             f"chr{chromosome_key}", max(1, position - window), min(chromosome_length, position + window)
         )
         candidates: dict[str, dict] = {}
+        aliases: dict[str, set[str]] = {}
+
+        def normalized_label(value) -> str | None:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            label = value.strip().casefold()
+            if label.startswith("ensg") and "." in label:
+                label = label.split(".", 1)[0]
+            return label
+
         for feature in region["features"]:
-            if feature.get("feature_type") != "gene" and not str(feature.get("id", "")).startswith("ENSG"):
+            if feature.get("feature_type") != "gene" and not str(feature.get("id", "")).upper().startswith("ENSG"):
                 continue
             symbol = feature.get("symbol") or feature.get("gene_id") or feature.get("id")
             if not symbol:
+                continue
+            feature_aliases = [
+                normalized_label(feature.get(field))
+                for field in ("symbol", "gene_id", "id", "ensembl_id")
+            ]
+            feature_aliases = [alias for alias in feature_aliases if alias]
+            stable_id = next((alias for alias in feature_aliases if alias.startswith("ensg")), None)
+            key = stable_id or normalized_label(symbol)
+            if key is None:
                 continue
             start, end = feature.get("start"), feature.get("end")
             distance = 0 if isinstance(start, int) and isinstance(end, int) and start <= position <= end else (
                 min(abs(position - start), abs(position - end)) if isinstance(start, int) and isinstance(end, int) else None
             )
-            candidates[str(symbol).casefold()] = {
+            candidate = candidates.setdefault(key, {
                 "gene": str(symbol), "ensembl_id": feature.get("id") or feature.get("gene_id"),
                 "start": start, "end": end, "distance_bp": distance,
                 "effect_count": 0, "modalities": [], "best_effect_quantile": None,
-            }
+                "ensembl_mapped": True,
+            })
+            if candidate.get("gene", "").upper().startswith("ENSG") and feature.get("symbol"):
+                candidate["gene"] = str(feature["symbol"])
+            for alias in feature_aliases:
+                aliases.setdefault(alias, set()).add(key)
 
         for effect in effects:
             gene = effect.get("gene")
             if not gene:
                 continue
-            key = str(gene).casefold()
+            label = normalized_label(gene)
+            matching_keys = aliases.get(label, set()) if label else set()
+            key = next(iter(matching_keys)) if len(matching_keys) == 1 else None
+            if key is None:
+                key = f"unmapped:{label or str(gene).strip().casefold()}"
             candidate = candidates.setdefault(key, {
                 "gene": str(gene), "ensembl_id": None, "start": None, "end": None,
-                "distance_bp": None, "effect_count": 0, "modalities": [], "best_effect_quantile": None,
+                "distance_bp": None, "effect_count": 0, "modalities": [],
+                "best_effect_quantile": None, "ensembl_mapped": False,
             })
+            candidate["ensembl_mapped"] = bool(candidate.get("ensembl_id")) or len(matching_keys) == 1
             candidate["effect_count"] += 1
             modality = effect.get("modality")
             if modality and modality not in candidate["modalities"]:
                 candidate["modalities"].append(modality)
             quantile = effect.get("quantile_score")
-            if isinstance(quantile, (int, float)):
+            if modality == "RNA_SEQ" and isinstance(quantile, (int, float)) and math.isfinite(quantile) and 0 <= quantile <= 1:
                 current = candidate["best_effect_quantile"]
                 candidate["best_effect_quantile"] = max(current, quantile) if current is not None else quantile
 
-        max_effect_count = max((item["effect_count"] for item in candidates.values()), default=0)
         rows = list(candidates.values())
         for row in rows:
             distance = row["distance_bp"]
             row["proximity_component"] = max(0.0, 1.0 - distance / window) if distance is not None else None
-            row["alphagenome_support_component"] = row["effect_count"] / max_effect_count if max_effect_count else None
-            components = [value for value in (row["proximity_component"], row["alphagenome_support_component"]) if value is not None]
-            row["research_priority_score"] = sum(components) / len(components) if components else None
+            row["alphagenome_support_component"] = row["best_effect_quantile"]
+            row["research_priority_score"] = (
+                0.5 * row["proximity_component"]
+                + 0.5 * (row["best_effect_quantile"] or 0.0)
+                if distance is not None else None
+            )
             row["modalities"].sort()
         rows.sort(key=lambda item: (item["research_priority_score"] is None, -(item["research_priority_score"] or 0), item["gene"].casefold()))
+        rank = 0
+        for row in rows:
+            if row["research_priority_score"] is None:
+                row["rank"] = None
+            else:
+                rank += 1
+                row["rank"] = rank
         return {
             "variant": {"chromosome": chromosome, "position": position, "assembly": "GRCh38"},
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "window_bp": window,
-            "method": "Equal-weight mean of available components: linear proximity (1 - distance/window) and submitted AlphaGenome effect-record count normalized by the maximum count among returned candidates. Missing components are omitted; effect counts use the submitted, potentially truncated prediction rows.",
+            "method": "Fixed equal-weight heuristic: 0.5 × linear proximity (1 - distance/window) + 0.5 × maximum RNA_SEQ effect quantile for the gene. Missing RNA_SEQ quantiles contribute zero without changing weights. Genes without an Ensembl locus are displayed unscored. The linear decay and weights are heuristic, not empirically calibrated.",
             "candidates": rows,
             "source": "Ensembl REST overlap/region plus submitted AlphaGenome Atlas effect records",
             "source_url": region.get("source_url"),
-            "note": "Research prioritization heuristic, not a probability, causal-gene determination, or clinical classification. Candidates and scores depend on the returned Ensembl interval, submitted AlphaGenome effect rows, and any per-scorer display truncation.",
+            "note": "This is a research-prioritization heuristic, not a probability, causal-gene determination, or clinical classification. RNA_SEQ quantiles, not effect-row counts, determine the support component. Effect counts are contextual only and may reflect per-scorer truncation. Unmapped labels remain visible but receive no rank or score until mapped to an Ensembl locus.",
         }
