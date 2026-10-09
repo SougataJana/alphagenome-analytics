@@ -26,6 +26,15 @@ export type VariantPrediction = {
   provider_model_version?: string | null;
   requested_scorers?: string[];
   variant?: Variant;
+  reference_validation?: {
+    status: "verified";
+    assembly: "GRCh38";
+    source: string;
+    source_url: string;
+    requested_reference: string;
+    observed_reference: string;
+    checked_at: string;
+  };
   avi_score?: number;
   avi_quantile?: number | null;
   feature_importance?: FeatureAttribution[];
@@ -33,6 +42,8 @@ export type VariantPrediction = {
   effects_total?: number;
   effects_total_by_scorer?: Record<string, number>;
   effects_truncated?: boolean;
+  provider_response_available?: boolean;
+  provider_response_endpoint?: string | null;
 };
 
 export type EvidenceAttachment = {
@@ -134,7 +145,11 @@ export function buildAnalysisResult(input: BuildAnalysisInput): AnalysisResult {
           name,
           version: input.predictions.find((prediction) => prediction.provider === name)?.provider_sdk_version,
           url: "https://deepmind.google.com/science/alphagenome/",
-        })),
+      })),
+        ...[...new Map(input.predictions.flatMap((prediction) => {
+          const check = prediction.reference_validation;
+          return check ? [[check.source, { name: check.source, url: check.source_url, version: check.assembly }] as const] : [];
+        })).values()],
         ...evidence.map((item) => ({ name: item.provider, url: item.source_url })),
       ],
     },

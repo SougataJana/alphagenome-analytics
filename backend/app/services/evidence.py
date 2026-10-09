@@ -396,6 +396,7 @@ class EvidenceService:
                 "gene": str(symbol), "ensembl_id": feature.get("id") or feature.get("gene_id"),
                 "start": start, "end": end, "distance_bp": distance,
                 "effect_count": 0, "modalities": [], "best_effect_quantile": None,
+                "best_effect_abs_quantile": None,
                 "ensembl_mapped": True,
             })
             if candidate.get("gene", "").upper().startswith("ENSG") and feature.get("symbol"):
@@ -415,7 +416,8 @@ class EvidenceService:
             candidate = candidates.setdefault(key, {
                 "gene": str(gene), "ensembl_id": None, "start": None, "end": None,
                 "distance_bp": None, "effect_count": 0, "modalities": [],
-                "best_effect_quantile": None, "ensembl_mapped": False,
+                "best_effect_quantile": None, "best_effect_abs_quantile": None,
+                "ensembl_mapped": False,
             })
             candidate["ensembl_mapped"] = bool(candidate.get("ensembl_id")) or len(matching_keys) == 1
             candidate["effect_count"] += 1
@@ -423,18 +425,21 @@ class EvidenceService:
             if modality and modality not in candidate["modalities"]:
                 candidate["modalities"].append(modality)
             quantile = effect.get("quantile_score")
-            if modality == "RNA_SEQ" and isinstance(quantile, (int, float)) and math.isfinite(quantile) and 0 <= quantile <= 1:
-                current = candidate["best_effect_quantile"]
-                candidate["best_effect_quantile"] = max(current, quantile) if current is not None else quantile
+            if modality == "RNA_SEQ" and isinstance(quantile, (int, float)) and math.isfinite(quantile) and -1 <= quantile <= 1:
+                magnitude = abs(quantile)
+                current_magnitude = candidate["best_effect_abs_quantile"]
+                if current_magnitude is None or magnitude > current_magnitude:
+                    candidate["best_effect_quantile"] = quantile
+                    candidate["best_effect_abs_quantile"] = magnitude
 
         rows = list(candidates.values())
         for row in rows:
             distance = row["distance_bp"]
             row["proximity_component"] = max(0.0, 1.0 - distance / window) if distance is not None else None
-            row["alphagenome_support_component"] = row["best_effect_quantile"]
+            row["alphagenome_support_component"] = row["best_effect_abs_quantile"]
             row["research_priority_score"] = (
                 0.5 * row["proximity_component"]
-                + 0.5 * (row["best_effect_quantile"] or 0.0)
+                + 0.5 * (row["best_effect_abs_quantile"] or 0.0)
                 if distance is not None else None
             )
             row["modalities"].sort()
@@ -450,7 +455,7 @@ class EvidenceService:
             "variant": {"chromosome": chromosome, "position": position, "assembly": "GRCh38"},
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "window_bp": window,
-            "method": "Fixed equal-weight heuristic: 0.5 × linear proximity (1 - distance/window) + 0.5 × maximum RNA_SEQ effect quantile for the gene. Missing RNA_SEQ quantiles contribute zero without changing weights. Genes without an Ensembl locus are displayed unscored. The linear decay and weights are heuristic, not empirically calibrated.",
+            "method": "Fixed equal-weight heuristic: 0.5 × linear proximity (1 - distance/window) + 0.5 × maximum absolute signed RNA_SEQ quantile for the gene. The signed quantile is retained separately to show direction; its absolute value contributes support magnitude. Missing RNA_SEQ quantiles contribute zero without changing weights. Genes without an Ensembl locus are displayed unscored. The linear decay and weights are heuristic, not empirically calibrated.",
             "candidates": rows,
             "source": "Ensembl REST overlap/region plus submitted AlphaGenome Atlas effect records",
             "source_url": region.get("source_url"),

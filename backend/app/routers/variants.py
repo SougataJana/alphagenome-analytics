@@ -12,7 +12,7 @@ from app.services.alphagenome import (
 from app.services import jobs
 from app.services.jobs import JobCapacityError
 from app.services.evidence import EvidenceProviderError, EvidenceService
-from app.services.store import get_analysis, list_analyses, save_analysis
+from app.services.store import get_analysis, get_provider_response, list_analyses, save_analysis, save_provider_response
 from app.services.statistics import compare_groups, gene_enrichment
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -74,6 +74,12 @@ def analyze_variant(request: VariantRequest) -> VariantAnalysisResult:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except AlphaGenomeRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if result.atlas_sdk_response is not None:
+        result.provider_response_available = save_provider_response(
+            result.analysis_id, result.provider, result.atlas_sdk_response
+        )
+        if result.provider_response_available:
+            result.provider_response_endpoint = f"/api/v1/analyses/{result.analysis_id}/atlas-response"
     save_analysis(
         result.analysis_id,
         result.created_at.isoformat(),
@@ -117,6 +123,14 @@ def analysis(analysis_id: str) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     return record
+
+
+@router.get("/analyses/{analysis_id}/atlas-response")
+def atlas_response(analysis_id: str) -> dict:
+    response = get_provider_response(analysis_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Preserved Atlas SDK response not found.")
+    return response
 
 
 def _evidence_call(callable_, *args):

@@ -11,7 +11,7 @@ from datetime import timedelta
 
 from app.models.variants import VariantAnalysisResult, VariantFailure, VariantRequest
 from app.services.alphagenome import AlphaGenomeNotConfigured, AlphaGenomeRequestError, AlphaGenomeService
-from app.services.store import save_analysis
+from app.services.store import save_analysis, save_provider_response
 
 _jobs: dict[str, dict] = {}
 _lock = Lock()
@@ -98,6 +98,13 @@ def run(job_id: str, variants: list[VariantRequest]) -> None:
                 index, variant = futures[future]
                 try:
                     results_by_index[index] = future.result()
+                    result = results_by_index[index]
+                    if result.atlas_sdk_response is not None:
+                        result.provider_response_available = save_provider_response(
+                            result.analysis_id, result.provider, result.atlas_sdk_response
+                        )
+                        if result.provider_response_available:
+                            result.provider_response_endpoint = f"/api/v1/analyses/{result.analysis_id}/atlas-response"
                 except AlphaGenomeNotConfigured:
                     with _lock:
                         job["status"] = "failed"

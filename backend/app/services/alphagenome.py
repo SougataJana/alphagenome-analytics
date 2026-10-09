@@ -1,4 +1,5 @@
 import logging
+import json
 import math
 import os
 from functools import lru_cache
@@ -13,6 +14,7 @@ from app.models.variants import (
     VariantAnalysisResult,
     VariantRequest,
 )
+from app.services.reference import ReferenceGenomeService, ReferenceValidationError
 
 logger = logging.getLogger(__name__)
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +27,48 @@ REQUESTED_SCORERS = [
     "ATAC",
 ]
 MAX_RETURNED_EFFECTS = 200
+
+
+def _serialize_atlas_matrix(matrix) -> dict:
+    def frame_records(frame):
+        # Pandas performs JSON-safe conversion for NumPy scalars and missing values.
+        return json.loads(frame.to_json(orient="records", double_precision=15))
+
+    def dense_values(values):
+        if hasattr(values, "toarray"):
+            values = values.toarray()
+        if hasattr(values, "tolist"):
+            values = values.tolist()
+
+        def json_safe(value):
+            if isinstance(value, list):
+                return [json_safe(item) for item in value]
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+            return value
+
+        return json_safe(values)
+
+    layers = {}
+    for name in matrix.layers.keys():
+        if isinstance(name, str):
+            layers[name] = dense_values(matrix.layers[name])
+    return {
+        "shape": list(matrix.shape),
+        "X": dense_values(matrix.X),
+        "obs": frame_records(matrix.obs),
+        "var": frame_records(matrix.var),
+        "layers": layers,
+    }
+
+
+def serialize_atlas_sdk_response(results) -> dict:
+    """Preserve the SDK-decoded scorer matrices and metadata without truncation."""
+    return {
+        scorer: _serialize_atlas_matrix(matrix)
+        for scorer, matrix in results.items()
+        if matrix is not None
+    }
 
 
 class AlphaGenomeNotConfigured(Exception):
@@ -53,7 +97,15 @@ def _atlas_client():
 class AlphaGenomeService:
     """Fetch normalized single-SNV scores from the official AlphaGenome Atlas API."""
 
+    def __init__(self, reference_service: ReferenceGenomeService | None = None):
+        self.reference_service = reference_service or ReferenceGenomeService()
+
     def analyze(self, variant: VariantRequest) -> VariantAnalysisResult:
+        try:
+            reference_validation = self.reference_service.verify(variant)
+        except ReferenceValidationError as exc:
+            raise AlphaGenomeRequestError(str(exc), exc.status_code) from exc
+
         from alphagenome.data import genome
 
         client = _atlas_client()
@@ -83,6 +135,8 @@ class AlphaGenomeService:
         except Exception as exc:
             logger.exception("AlphaGenome Atlas request failed.")
             raise AlphaGenomeRequestError("AlphaGenome Atlas request failed.", 502) from exc
+
+        atlas_sdk_response = serialize_atlas_sdk_response(results)
 
         avi = results.get("AVI_SCORE")
         if avi is None or avi.X.shape[0] == 0 or avi.X.shape[1] == 0:
@@ -153,7 +207,7 @@ class AlphaGenomeService:
                         else None
                     )
                     if quantile is not None and (
-                        not math.isfinite(quantile) or not 0 <= quantile <= 1
+                        not math.isfinite(quantile) or not -1 <= quantile <= 1
                     ):
                         logger.warning("AlphaGenome Atlas returned an invalid effect quantile; omitting it.")
                         quantile = None
@@ -191,6 +245,7 @@ class AlphaGenomeService:
             provider_sdk_version=self._sdk_version(),
             provider_model_version=None,
             variant=variant,
+            reference_validation=reference_validation,
             avi_score=avi_score,
             avi_quantile=avi_quantile,
             requested_scorers=REQUESTED_SCORERS.copy(),
@@ -201,6 +256,8 @@ class AlphaGenomeService:
             effects_truncated=any(
                 count > MAX_RETURNED_EFFECTS for count in effects_total_by_scorer.values()
             ),
+            provider_response_available=True,
+            atlas_sdk_response=atlas_sdk_response,
         )
 
     @staticmethod

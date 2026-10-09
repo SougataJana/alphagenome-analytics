@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -73,7 +73,19 @@ class ModalityEffect(BaseModel):
     gene: str | None = None
     tissue: str | None = None
     raw_score: float = Field(allow_inf_nan=False)
-    quantile_score: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    # Signed scorer quantiles preserve direction and range from -1 to 1;
+    # unsigned scorer quantiles use the non-negative portion of that range.
+    quantile_score: float | None = Field(default=None, ge=-1, le=1, allow_inf_nan=False)
+
+
+class ReferenceValidation(BaseModel):
+    status: Literal["verified"]
+    assembly: Literal["GRCh38"]
+    source: str
+    source_url: str
+    requested_reference: str = Field(pattern=r"^[ACGT]$")
+    observed_reference: str = Field(pattern=r"^[ACGT]$")
+    checked_at: datetime
 
 
 class VariantAnalysisResult(BaseModel):
@@ -84,6 +96,7 @@ class VariantAnalysisResult(BaseModel):
     provider_sdk_version: str | None = None
     provider_model_version: str | None = None
     variant: VariantRequest
+    reference_validation: ReferenceValidation
     avi_score: float = Field(allow_inf_nan=False)
     avi_quantile: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     requested_scorers: list[str] = Field(default_factory=list)
@@ -92,6 +105,9 @@ class VariantAnalysisResult(BaseModel):
     effects_total: int = Field(default=0, ge=0)
     effects_total_by_scorer: dict[str, int] = Field(default_factory=dict)
     effects_truncated: bool = False
+    provider_response_available: bool = False
+    provider_response_endpoint: str | None = None
+    atlas_sdk_response: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class VariantFailure(BaseModel):

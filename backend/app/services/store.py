@@ -1,6 +1,7 @@
 """Local persistence for reproducible analysis records and result payloads."""
 
 import json
+import gzip
 import os
 import sqlite3
 import threading
@@ -29,7 +30,45 @@ def _connect() -> sqlite3.Connection:
             results_json TEXT NOT NULL
         )"""
     )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS provider_responses (
+            analysis_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            payload_gzip BLOB NOT NULL
+        )"""
+    )
     return connection
+
+
+def save_provider_response(analysis_id: str, provider: str, payload: dict[str, Any]) -> bool:
+    if not _persistence_enabled():
+        return False
+    encoded = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    compressed = gzip.compress(encoded)
+    with _lock, _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO provider_responses (analysis_id, provider, payload_gzip) VALUES (?, ?, ?)",
+            (analysis_id, provider, compressed),
+        )
+    return True
+
+
+def get_provider_response(analysis_id: str) -> dict[str, Any] | None:
+    if not _persistence_enabled():
+        return None
+    with _lock, _connect() as connection:
+        row = connection.execute(
+            "SELECT provider, payload_gzip FROM provider_responses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "analysis_id": analysis_id,
+        "provider": row["provider"],
+        "representation": "complete SDK-decoded AlphaGenome Atlas matrices; not raw HTTP bytes",
+        "response": json.loads(gzip.decompress(row["payload_gzip"]).decode("utf-8")),
+    }
 
 
 def save_analysis(

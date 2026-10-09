@@ -1,11 +1,22 @@
 import unittest
-from unittest.mock import patch
+import tempfile
+import sys
+import types
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import httpx
+import numpy as np
+import pandas as pd
 
 from pydantic import ValidationError
 
-from app.models.variants import VariantRequest
-from app.services.evidence import EvidenceService
-from app.services.statistics import compare_groups, gene_enrichment
+from app.models.variants import ModalityEffect, VariantRequest
+from app.services.evidence import EvidenceProviderError, EvidenceService
+from app.services.alphagenome import AlphaGenomeService, _serialize_atlas_matrix
+from app.services.reference import ReferenceGenomeService, ReferenceValidationError
+from app.services.statistics import _bh, compare_groups, gene_enrichment
+from app.services import store
 
 
 class VariantValidationTests(unittest.TestCase):
@@ -30,6 +41,152 @@ class VariantValidationTests(unittest.TestCase):
             VariantRequest(chromosome="chrUn", position=1, reference="A", alternate="C")
         with self.assertRaises(ValidationError):
             VariantRequest(chromosome="chr1", position=1, reference="AA", alternate="C")
+
+    def test_accepts_first_and_last_grch38_positions(self):
+        first = VariantRequest(chromosome="chr1", position=1, reference="A", alternate="C")
+        last = VariantRequest(chromosome="chr1", position=248_956_422, reference="A", alternate="C")
+        self.assertEqual(first.position, 1)
+        self.assertEqual(last.position, 248_956_422)
+
+
+class ReferenceAlleleTests(unittest.TestCase):
+    def variant(self, chromosome="chr7", position=140_453_136, reference="A", alternate="G"):
+        return VariantRequest(chromosome=chromosome, position=position, reference=reference, alternate=alternate)
+
+    def service(self, status_code=200, text="A"):
+        response = httpx.Response(status_code, text=text, request=httpx.Request("GET", "https://rest.ensembl.org"))
+        client = Mock()
+        client.get.return_value = response
+        return ReferenceGenomeService(client=client), client
+
+    def test_verifies_matching_ref_and_records_provider_provenance(self):
+        service, client = self.service(text="a\n")
+        result = service.verify(self.variant())
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["assembly"], "GRCh38")
+        self.assertEqual(result["observed_reference"], "A")
+        self.assertEqual(result["source"], "Ensembl REST sequence/region")
+        self.assertEqual(result["source_url"], "https://rest.ensembl.org/sequence/region/human/7:140453136..140453136:1?coord_system_version=GRCh38")
+        self.assertEqual(client.get.call_args.kwargs["params"], {"coord_system_version": "GRCh38"})
+        client.get.assert_called_once()
+
+    def test_rejects_mismatch_without_correcting_input(self):
+        service, _ = self.service(text="C")
+        with self.assertRaisesRegex(ReferenceValidationError, "submitted REF=A, Ensembl reports C") as error:
+            service.verify(self.variant())
+        self.assertEqual(error.exception.status_code, 422)
+
+    def test_invalid_provider_response_fails_closed(self):
+        service, _ = self.service(text="AC")
+        with self.assertRaisesRegex(ReferenceValidationError, "invalid single-base"):
+            service.verify(self.variant())
+
+    def test_ensembl_failure_does_not_silently_skip_verification(self):
+        service, _ = self.service(status_code=503, text="unavailable")
+        with self.assertRaises(ReferenceValidationError) as error:
+            service.verify(self.variant())
+        self.assertEqual(error.exception.status_code, 502)
+
+    def test_mitochondrial_alias_maps_to_ensembl_mt_sequence(self):
+        service, client = self.service(text="A")
+        service.verify(self.variant(chromosome="chrM", position=1))
+        self.assertIn("/MT:1..1:1", client.get.call_args.args[0])
+
+    def test_alpha_query_is_not_called_when_reference_check_fails(self):
+        reference = Mock()
+        reference.verify.side_effect = ReferenceValidationError("REF mismatch", 422)
+        service = AlphaGenomeService(reference_service=reference)
+        with patch("app.services.alphagenome._atlas_client") as atlas_client:
+            from app.services.alphagenome import AlphaGenomeRequestError
+            with self.assertRaises(AlphaGenomeRequestError) as error:
+                service.analyze(self.variant())
+        self.assertEqual(error.exception.status_code, 422)
+        atlas_client.assert_not_called()
+
+    def test_effect_quantiles_preserve_signed_direction(self):
+        effect = ModalityEffect(
+            modality="RNA_SEQ", raw_score=-1.36, quantile_score=-0.9999998
+        )
+        self.assertAlmostEqual(effect.quantile_score, -0.9999998)
+        with self.assertRaises(ValidationError):
+            ModalityEffect(modality="RNA_SEQ", raw_score=1.0, quantile_score=-1.01)
+
+
+class AtlasResponsePreservationTests(unittest.TestCase):
+    def test_matrix_serializer_keeps_metadata_quantiles_and_json_safe_values(self):
+        class Frame:
+            def to_json(self, **kwargs):
+                return '[{"label":"biosample"}]'
+
+        class Matrix:
+            shape = (1, 2)
+            X = [[1.25, float("nan")]]
+            obs = Frame()
+            var = Frame()
+            layers = {"quantiles": [[-0.98, 0.4]], None: [[123]]}
+
+        result = _serialize_atlas_matrix(Matrix())
+        self.assertEqual(result["shape"], [1, 2])
+        self.assertEqual(result["X"], [[1.25, None]])
+        self.assertEqual(result["obs"], [{"label": "biosample"}])
+        self.assertEqual(result["layers"], {"quantiles": [[-0.98, 0.4]]})
+
+    def test_compressed_provider_response_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(store, "DB_PATH", Path(directory) / "test.sqlite3"):
+                payload = {"RNA_SEQ": {"X": [[-1.36]], "layers": {"quantiles": [[-0.99]]}}}
+                self.assertTrue(store.save_provider_response("analysis-1", "AlphaGenome Atlas", payload))
+                restored = store.get_provider_response("analysis-1")
+        self.assertEqual(restored["response"], payload)
+        self.assertIn("not raw HTTP bytes", restored["representation"])
+
+    def test_atlas_adapter_preserves_signed_quantile_and_full_decoded_matrices(self):
+        class Matrix:
+            def __init__(self, x, obs, var, layers=None):
+                self.X = np.asarray(x, dtype=float)
+                self.obs = pd.DataFrame(obs)
+                self.var = pd.DataFrame(var)
+                self.layers = {key: np.asarray(value, dtype=float) for key, value in (layers or {}).items()}
+                self.shape = self.X.shape
+
+        response = {
+            "AVI_SCORE": Matrix([[1.5548]], {"variant": ["v1"]}, {"name": ["AVI"]}, {"quantiles": [[0.99894]]}),
+            "AVI_SCORE_FEATURE_IMPORTANCE": Matrix([[0.7, -0.2]], {"variant": ["v1"]}, {"name": ["RNA_SEQ", "ATAC"]}),
+            "RNA_SEQ": Matrix(
+                [[-1.36, 0.2]],
+                {"gene_name": ["TP53"], "gene_id": ["ENSG00000141510"], "strand": [1]},
+                {"name": ["track-a", "track-b"], "biosample_name": ["lung", "liver"], "gtex_tissue": [None, None]},
+                {"quantiles": [[-0.99998, 0.15]]},
+            ),
+        }
+        client = Mock()
+        client.query_variant.return_value = response
+        parent = types.ModuleType("alphagenome")
+        data = types.ModuleType("alphagenome.data")
+        genome = types.ModuleType("alphagenome.data.genome")
+        genome.Variant = lambda **kwargs: kwargs
+        parent.data = data
+        data.genome = genome
+        variant = VariantRequest(chromosome="chr22", position=36_201_698, reference="A", alternate="C")
+        service = AlphaGenomeService(reference_service=Mock(verify=Mock(return_value={
+            "status": "verified", "assembly": "GRCh38", "source": "Ensembl REST sequence/region",
+            "source_url": "https://rest.ensembl.org/sequence/region/human/22:36201698..36201698:1",
+            "requested_reference": "A", "observed_reference": "A", "checked_at": "2026-10-09T00:00:00+00:00",
+        })))
+        with patch("app.services.alphagenome._atlas_client", return_value=client), patch.dict(
+            sys.modules,
+            {"alphagenome": parent, "alphagenome.data": data, "alphagenome.data.genome": genome},
+        ):
+            result = service.analyze(variant)
+
+        self.assertEqual(result.avi_score, 1.5548)
+        self.assertAlmostEqual(result.avi_quantile, 0.99894)
+        self.assertEqual(result.reference_validation.observed_reference, "A")
+        self.assertEqual(result.effects[0].quantile_score, -0.99998)
+        self.assertEqual(result.effects[0].gene, "TP53")
+        self.assertIsNone(result.provider_model_version)
+        self.assertEqual(result.atlas_sdk_response["RNA_SEQ"]["shape"], [1, 2])
+        self.assertEqual(result.atlas_sdk_response["RNA_SEQ"]["layers"]["quantiles"], [[-0.99998, 0.15]])
 
 
 class StatisticsTests(unittest.TestCase):
@@ -62,6 +219,17 @@ class StatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(by_name["contains_a"]["p_value"], 5 / 6)
         self.assertGreaterEqual(by_name["contains_a"]["q_value_bh"], by_name["contains_a"]["p_value"])
 
+    def test_bh_matches_known_reference_vector(self):
+        observed = _bh([0.01, 0.04, 0.03, 0.002])
+        expected = [0.02, 0.04, 0.04, 0.008]
+        np.testing.assert_allclose(observed, expected, rtol=0, atol=1e-12)
+
+    def test_enrichment_zero_overlap_has_unit_p_value(self):
+        result = gene_enrichment(["A"], ["A", "B", "C"], {"other": ["B"]})
+        row = result["results"][0]
+        self.assertEqual(row["overlap_n"], 0)
+        self.assertEqual(row["p_value"], 1.0)
+
 
 class RegionValidationTests(unittest.TestCase):
     def setUp(self):
@@ -80,6 +248,45 @@ class RegionValidationTests(unittest.TestCase):
             self.service.encode_region("chr8", 200, 100)
 
 
+class ProviderAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.service = EvidenceService()
+
+    def test_ensembl_region_adapter_normalizes_annotation_and_provenance(self):
+        response = httpx.Response(
+            200,
+            json=[{"id": "ENSG00000141510", "feature_type": "gene", "external_name": "TP53", "start": 100, "end": 200}],
+            request=httpx.Request("GET", "https://rest.ensembl.org/overlap/region"),
+        )
+        with patch.object(self.service, "_get", return_value=response):
+            result = self.service.region("chr1", 100, 200)
+        self.assertEqual(result["region"]["assembly"], "GRCh38")
+        self.assertEqual(result["features"][0]["symbol"], "TP53")
+        self.assertEqual(result["features"][0]["source"], "Ensembl")
+        self.assertTrue(result["source_url"].startswith("https://rest.ensembl.org/"))
+
+    def test_gnomad_adapter_keeps_cohorts_separate_and_computes_frequency(self):
+        response = httpx.Response(
+            200,
+            json={"data": {"variant": {"variantId": "22-36201698-A-C", "genome": {"ac": 10, "an": 1000}, "exome": {"ac": 2, "an": 200}}}},
+            request=httpx.Request("POST", "https://gnomad.broadinstitute.org/api"),
+        )
+        with patch("app.services.evidence.httpx.post", return_value=response):
+            result = self.service.gnomad_variant("chr22", 36_201_698, "A", "C")
+        self.assertEqual(result["dataset"], "gnomad_r4 (GRCh38)")
+        self.assertEqual(result["result"]["genome"]["af_calculated"], 0.01)
+        self.assertEqual(result["result"]["exome"]["af_calculated"], 0.01)
+        self.assertIn("kept separate", result["note"])
+
+    def test_provider_failure_is_not_returned_as_an_empty_biological_result(self):
+        with patch.object(self.service, "region", side_effect=EvidenceProviderError("Ensembl timed out")):
+            result = self.service.synthesize_variant("chr1", 100, "A", "C")
+        provider = result["providers"]["Ensembl region"]
+        self.assertEqual(provider["status"], "unavailable")
+        self.assertIn("timed out", provider["error"])
+        self.assertNotIn("result", provider)
+
+
 class VariantToGeneScoringTests(unittest.TestCase):
     def setUp(self):
         self.service = EvidenceService()
@@ -92,13 +299,15 @@ class VariantToGeneScoringTests(unittest.TestCase):
         effects = [
             {"gene": "GENEA", "modality": "RNA_SEQ", "quantile_score": 0.1}
             for _ in range(12)
-        ] + [{"gene": "GENEB", "modality": "RNA_SEQ", "quantile_score": 0.9}]
+        ] + [{"gene": "GENEB", "modality": "RNA_SEQ", "quantile_score": -0.9}]
         with patch.object(self.service, "region", return_value={"features": features, "source_url": "source"}):
             result = self.service.prioritize_variant_genes("chr1", 1000, effects, window=1000)
         self.assertEqual(result["candidates"][0]["gene"], "GENEB")
         by_gene = {row["gene"]: row for row in result["candidates"]}
         self.assertGreater(by_gene["GENEA"]["effect_count"], by_gene["GENEB"]["effect_count"])
         self.assertLess(by_gene["GENEA"]["research_priority_score"], by_gene["GENEB"]["research_priority_score"])
+        self.assertEqual(by_gene["GENEB"]["best_effect_quantile"], -0.9)
+        self.assertEqual(by_gene["GENEB"]["alphagenome_support_component"], 0.9)
 
     def test_unmapped_gene_with_missing_distance_is_unscored(self):
         features = [
