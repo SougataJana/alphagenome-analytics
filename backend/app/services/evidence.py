@@ -1,6 +1,8 @@
 """Read-only public evidence adapters. Every result carries its source."""
 
 from urllib.parse import quote
+
+from app.models.variants import GRCH38_CHROMOSOME_LENGTHS, normalize_grch38_chromosome
 from pathlib import Path
 import os
 
@@ -88,7 +90,9 @@ class EvidenceService:
     def region(self, chromosome: str, start: int, end: int) -> dict:
         if start < 1 or end < start or end - start > 5_000_000:
             raise ValueError("Region must be positive, ordered, and no wider than 5 Mb.")
-        chrom = chromosome.removeprefix("chr")
+        chrom = normalize_grch38_chromosome(chromosome)
+        if end > GRCH38_CHROMOSOME_LENGTHS[chrom]:
+            raise ValueError("Region end exceeds the GRCh38 chromosome length.")
         region = f"{chrom}:{start}-{end}"
         url = f"https://rest.ensembl.org/overlap/region/homo_sapiens/{quote(region, safe=':-')}"
         response = self._get(
@@ -261,9 +265,9 @@ class EvidenceService:
     def encode_region(self, chromosome: str, start: int, end: int) -> dict:
         if start < 1 or end <= start or end - start > 1_000_000:
             raise ValueError("SCREEN regions must be ordered, positive, and no wider than 1 Mb.")
-        chrom = chromosome.removeprefix("chr")
-        if chrom.upper() not in {*(str(n) for n in range(1, 23)), "X", "Y", "M", "MT"}:
-            raise ValueError("Enter a human chromosome from chr1–chr22, chrX, chrY, or chrM.")
+        chrom = normalize_grch38_chromosome(chromosome)
+        if end > GRCH38_CHROMOSOME_LENGTHS[chrom]:
+            raise ValueError("Region end exceeds the GRCh38 chromosome length.")
         api_key = os.getenv("SCREEN_API_KEY", "").strip()
         if not api_key:
             raise EvidenceProviderError(
@@ -352,7 +356,11 @@ class EvidenceService:
     def prioritize_variant_genes(self, chromosome: str, position: int, effects: list[dict], window: int = 100_000) -> dict:
         if window < 1 or window > 1_000_000:
             raise ValueError("Gene-prioritization window must be between 1 bp and 1 Mb.")
-        region = self.region(chromosome, max(1, position - window), position + window)
+        chromosome_key = normalize_grch38_chromosome(chromosome)
+        chromosome_length = GRCH38_CHROMOSOME_LENGTHS[chromosome_key]
+        region = self.region(
+            f"chr{chromosome_key}", max(1, position - window), min(chromosome_length, position + window)
+        )
         candidates: dict[str, dict] = {}
         for feature in region["features"]:
             if feature.get("feature_type") != "gene" and not str(feature.get("id", "")).startswith("ENSG"):
@@ -402,9 +410,9 @@ class EvidenceService:
             "variant": {"chromosome": chromosome, "position": position, "assembly": "GRCh38"},
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "window_bp": window,
-            "method": "Equal-weight mean of available components: linear proximity (1 - distance/window) and AlphaGenome effect-record count normalized by the maximum count among returned candidates. Missing components are omitted.",
+            "method": "Equal-weight mean of available components: linear proximity (1 - distance/window) and submitted AlphaGenome effect-record count normalized by the maximum count among returned candidates. Missing components are omitted; effect counts use the submitted, potentially truncated prediction rows.",
             "candidates": rows,
             "source": "Ensembl REST overlap/region plus submitted AlphaGenome Atlas effect records",
             "source_url": region.get("source_url"),
-            "note": "Research prioritization heuristic, not a probability, causal-gene determination, or clinical classification. Candidates and scores depend on the returned Ensembl interval and AlphaGenome effect labels.",
+            "note": "Research prioritization heuristic, not a probability, causal-gene determination, or clinical classification. Candidates and scores depend on the returned Ensembl interval, submitted AlphaGenome effect rows, and any per-scorer display truncation.",
         }

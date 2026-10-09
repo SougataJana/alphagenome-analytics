@@ -45,7 +45,7 @@ def submit(variants: list[VariantRequest]) -> dict:
         "completed": 0,
         "results": [],
         "failures": [],
-        "manifest": {"genome_assembly": "GRCh38", "provider": "AlphaGenome Atlas", "sdk_version": _sdk_version(), "provider_model_version": "not exposed by the Atlas response", "input_variants": [v.model_dump() for v in variants]},
+        "manifest": {"genome_assembly": "GRCh38", "provider": "AlphaGenome Atlas", "sdk_version": _sdk_version(), "provider_model_version": None, "requested_scorers": ["AVI_SCORE", "AVI_SCORE_FEATURE_IMPORTANCE", "RNA_SEQ", "SPLICE_SITES", "ATAC"], "input_order_preserved": True, "input_variants": [v.model_dump(mode="json") for v in variants]},
     }
     with _lock:
         now = datetime.now(timezone.utc)
@@ -86,28 +86,31 @@ def run(job_id: str, variants: list[VariantRequest]) -> None:
             return
         job["status"] = "running"
 
-    results: list[VariantAnalysisResult] = []
-    failures: list[VariantFailure] = []
+    results_by_index: dict[int, VariantAnalysisResult] = {}
+    failures_by_index: dict[int, VariantFailure] = {}
     try:
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(_service.analyze, variant): variant for variant in variants}
+            futures = {
+                executor.submit(_service.analyze, variant): (index, variant)
+                for index, variant in enumerate(variants)
+            }
             for future in as_completed(futures):
-                variant = futures[future]
+                index, variant = futures[future]
                 try:
-                    results.append(future.result())
+                    results_by_index[index] = future.result()
                 except AlphaGenomeNotConfigured:
                     with _lock:
                         job["status"] = "failed"
                         job["error"] = "AlphaGenome API key is not configured."
                     break
                 except AlphaGenomeRequestError as exc:
-                    failures.append(VariantFailure(variant=variant, error=str(exc)))
+                    failures_by_index[index] = VariantFailure(variant=variant, error=str(exc))
                 except Exception:
-                    failures.append(VariantFailure(variant=variant, error="Unexpected provider error."))
+                    failures_by_index[index] = VariantFailure(variant=variant, error="Unexpected provider error.")
                 with _lock:
-                    job["completed"] = len(results) + len(failures)
-                    job["results"] = [item.model_dump(mode="json") for item in results]
-                    job["failures"] = [item.model_dump(mode="json") for item in failures]
+                    job["completed"] = len(results_by_index) + len(failures_by_index)
+                    job["results"] = [results_by_index[i].model_dump(mode="json") for i in sorted(results_by_index)]
+                    job["failures"] = [failures_by_index[i].model_dump(mode="json") for i in sorted(failures_by_index)]
                     if job["completed"] % 25 == 0:
                         save_analysis(
                             job_id, job["created_at"], "vcf_batch", "running", job["manifest"],
@@ -116,12 +119,12 @@ def run(job_id: str, variants: list[VariantRequest]) -> None:
         with _lock:
             if job["status"] != "failed":
                 job["status"] = "complete"
-            job["completed"] = len(results) + len(failures)
-            job["results"] = [item.model_dump(mode="json") for item in results]
-            job["failures"] = [item.model_dump(mode="json") for item in failures]
+            job["completed"] = len(results_by_index) + len(failures_by_index)
+            job["results"] = [results_by_index[i].model_dump(mode="json") for i in sorted(results_by_index)]
+            job["failures"] = [failures_by_index[i].model_dump(mode="json") for i in sorted(failures_by_index)]
             save_analysis(
                 job_id, job["created_at"], "vcf_batch", job["status"], job["manifest"],
-                {"results": job["results"], "failures": job["failures"], "completed": job["completed"]},
+                {"results": job["results"], "failures": job["failures"], "completed": job["completed"], "input_order_preserved": True},
             )
     except Exception:
         with _lock:

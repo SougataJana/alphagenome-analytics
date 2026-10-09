@@ -1,7 +1,7 @@
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
 
 from app.models.variants import ModalityEffect, VariantAnalysisResult, VariantRequest
 from app.services.alphagenome import (
@@ -30,28 +30,39 @@ def _sdk_version() -> str | None:
 
 
 class BatchRequest(BaseModel):
-    variants: list[VariantRequest] = Field(min_length=1, max_length=5000)
+    variants: list[VariantRequest] = Field(min_length=1, max_length=100)
 
 
 class CompareRequest(BaseModel):
-    case_scores: list[float] = Field(min_length=2, max_length=50000)
-    control_scores: list[float] = Field(min_length=2, max_length=50000)
-    iterations: int = Field(default=10000, ge=100, le=50000)
+    case_scores: list[FiniteFloat] = Field(min_length=2, max_length=1000)
+    control_scores: list[FiniteFloat] = Field(min_length=2, max_length=1000)
+    iterations: int = Field(default=10000, ge=100, le=10000)
     seed: int = Field(default=42, ge=0, le=2147483647)
 
 
 class EnrichmentRequest(BaseModel):
     genes: list[str] = Field(min_length=1, max_length=5000)
     background: list[str] = Field(min_length=2, max_length=50000)
-    gene_sets: dict[str, list[str]]
+    gene_sets: dict[str, list[str]] = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def bound_gene_set_payload(self) -> "EnrichmentRequest":
+        if sum(len(members) for members in self.gene_sets.values()) > 200_000:
+            raise ValueError("Gene-set input exceeds the 200,000-member request limit.")
+        return self
 
 
 class EvidenceSynthesisRequest(VariantRequest):
     rsid: str | None = Field(default=None, pattern=r"^rs[0-9]+$")
 
+    @field_validator("rsid", mode="before")
+    @classmethod
+    def normalize_rsid(cls, value: str | None) -> str | None:
+        return value.strip().lower() if isinstance(value, str) else value
+
 
 class VariantGeneRequest(VariantRequest):
-    effects: list[ModalityEffect] = Field(default_factory=list, max_length=5000)
+    effects: list[ModalityEffect] = Field(default_factory=list, max_length=1000)
     window_bp: int = Field(default=100_000, ge=1, le=1_000_000)
 
 
@@ -68,7 +79,7 @@ def analyze_variant(request: VariantRequest) -> VariantAnalysisResult:
         result.created_at.isoformat(),
         "single_variant",
         "complete",
-        {"variant": request.model_dump(mode="json"), "genome_assembly": "GRCh38", "provider": "AlphaGenome Atlas", "sdk_version": _sdk_version(), "provider_model_version": "not exposed by the Atlas response"},
+        {"variant": request.model_dump(mode="json"), "genome_assembly": "GRCh38", "provider": "AlphaGenome Atlas", "sdk_version": _sdk_version(), "provider_model_version": None},
         result.model_dump(mode="json"),
     )
     return result

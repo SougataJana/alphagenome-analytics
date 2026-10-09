@@ -35,7 +35,7 @@ The frontend expects the API at `http://localhost:8000` by default. Set `NEXT_PU
 
 ## AlphaGenome API key
 
-Save `ALPHAGENOME_API_KEY=your_key` in `backend/.env`. The backend loads this file locally; `.env` is excluded from Git. The single-variant endpoint queries AlphaGenome Atlas for the AVI score and feature attributions. Use is subject to AlphaGenome's terms; predictions are for research and theoretical modelling, not clinical decision-making.
+Save `ALPHAGENOME_API_KEY=your_key` in `backend/.env`. The backend loads this file locally; `.env` is excluded from Git. The single-variant endpoint queries AlphaGenome Atlas for AVI and requested scorer output. AlphaGenome is for non-commercial research and theoretical modelling; outputs must not be used clinically or to train machine-learning models. A shared-key hosted service requires confirming that this deployment model complies with the provider's current terms. See [scientific methods and validation status](docs/METHODS.md).
 
 ## Available workflows
 
@@ -43,7 +43,7 @@ The app includes single-variant prediction, effect review, AVI-based ranking, lo
 
 The AlphaGenome key is used only by the backend. Variant and region lookups send queries to the selected providers. VCF contents are parsed locally in the browser; variant coordinates are sent to AlphaGenome Atlas only after the user confirms. In public deployment mode, server-side analysis persistence is disabled and each visitor's history is kept in that visitor's browser. Local development keeps SQLite persistence enabled by default.
 
-The tool does not calculate clinical interpretations. It connects to Ensembl, GWAS Catalog, ClinVar, GTEx eQTL, gnomAD, and SCREEN's GraphQL API for ENCODE Registry cCRE annotations. SCREEN region search requires a `SCREEN_API_KEY` configured on the backend; save it in `backend/.env` locally and as a secret backend environment variable in Render. Keys expire after 90 days. cCRE spans and source signal annotations are kept separate from AlphaGenome predictions. No live genomic provider requests were made while implementing these workflows.
+The tool does not calculate clinical interpretations. It connects to Ensembl, GWAS Catalog, ClinVar, GTEx eQTL, gnomAD, and SCREEN's GraphQL API for ENCODE Registry cCRE annotations. SCREEN region search requires a `SCREEN_API_KEY` configured on the backend; save it in `backend/.env` locally and as a secret backend environment variable in Render. Keys expire after 90 days. cCRE spans and source signal annotations are kept separate from AlphaGenome predictions. Empty results do not prove absence; provider failures are not biological results.
 
 ## Deploy to Render
 

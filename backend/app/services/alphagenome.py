@@ -17,6 +17,14 @@ from app.models.variants import (
 logger = logging.getLogger(__name__)
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(BACKEND_ROOT / ".env")
+REQUESTED_SCORERS = [
+    "AVI_SCORE",
+    "AVI_SCORE_FEATURE_IMPORTANCE",
+    "RNA_SEQ",
+    "SPLICE_SITES",
+    "ATAC",
+]
+MAX_RETURNED_EFFECTS = 200
 
 
 class AlphaGenomeNotConfigured(Exception):
@@ -57,13 +65,7 @@ class AlphaGenomeService:
                     reference_bases=variant.reference,
                     alternate_bases=variant.alternate,
                 ),
-                requested_scorers=[
-                    "AVI_SCORE",
-                    "AVI_SCORE_FEATURE_IMPORTANCE",
-                    "RNA_SEQ",
-                    "SPLICE_SITES",
-                    "ATAC",
-                ],
+                requested_scorers=REQUESTED_SCORERS,
             )
         except PermissionError as exc:
             logger.warning("AlphaGenome Atlas rejected the configured credentials or access.")
@@ -93,7 +95,10 @@ class AlphaGenomeService:
             raise AlphaGenomeRequestError("AlphaGenome Atlas returned a non-finite AVI score.", 502)
         quantiles = avi.layers.get("quantiles")
         avi_quantile = float(quantiles[0, 0]) if quantiles is not None else None
-        if avi_quantile is not None and not math.isfinite(avi_quantile):
+        if avi_quantile is not None and (
+            not math.isfinite(avi_quantile) or not 0 <= avi_quantile <= 1
+        ):
+            logger.warning("AlphaGenome Atlas returned an invalid AVI quantile; omitting it.")
             avi_quantile = None
 
         feature_attributions: list[FeatureAttribution] = []
@@ -147,7 +152,10 @@ class AlphaGenomeService:
                         if quantile_matrix is not None
                         else None
                     )
-                    if quantile is not None and not math.isfinite(quantile):
+                    if quantile is not None and (
+                        not math.isfinite(quantile) or not 0 <= quantile <= 1
+                    ):
+                        logger.warning("AlphaGenome Atlas returned an invalid effect quantile; omitting it.")
                         quantile = None
                     effects.append(
                         ModalityEffect(
@@ -159,18 +167,40 @@ class AlphaGenomeService:
                             quantile_score=quantile,
                         )
                     )
-        effects.sort(key=lambda item: abs(item.raw_score), reverse=True)
+        total_effects = len(effects)
+        effects_by_scorer = {
+            scorer: sorted(
+                (effect for effect in effects if effect.modality == scorer),
+                key=lambda effect: abs(effect.raw_score),
+                reverse=True,
+            )
+            for scorer in ("RNA_SEQ", "SPLICE_SITES", "ATAC")
+        }
+        effects_total_by_scorer = {scorer: len(items) for scorer, items in effects_by_scorer.items()}
+        # Cap each scorer independently: absolute raw values have different scales
+        # across scorers and must not compete for a shared top-N cutoff.
+        effects = [
+            effect
+            for scorer in ("RNA_SEQ", "SPLICE_SITES", "ATAC")
+            for effect in effects_by_scorer[scorer][:MAX_RETURNED_EFFECTS]
+        ]
 
         return VariantAnalysisResult(
             status="complete",
             provider="AlphaGenome Atlas",
             provider_sdk_version=self._sdk_version(),
-            provider_model_version="Not exposed by the Atlas response",
+            provider_model_version=None,
             variant=variant,
             avi_score=avi_score,
             avi_quantile=avi_quantile,
+            requested_scorers=REQUESTED_SCORERS.copy(),
             feature_importance=feature_attributions,
-            effects=effects[:200],
+            effects=effects,
+            effects_total=total_effects,
+            effects_total_by_scorer=effects_total_by_scorer,
+            effects_truncated=any(
+                count > MAX_RETURNED_EFFECTS for count in effects_total_by_scorer.values()
+            ),
         )
 
     @staticmethod

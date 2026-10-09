@@ -24,11 +24,15 @@ export type VariantPrediction = {
   provider?: string;
   provider_sdk_version?: string | null;
   provider_model_version?: string | null;
+  requested_scorers?: string[];
   variant?: Variant;
   avi_score?: number;
   avi_quantile?: number | null;
   feature_importance?: FeatureAttribution[];
   effects?: Effect[];
+  effects_total?: number;
+  effects_total_by_scorer?: Record<string, number>;
+  effects_truncated?: boolean;
 };
 
 export type EvidenceAttachment = {

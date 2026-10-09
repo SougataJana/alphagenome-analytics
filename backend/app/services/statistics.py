@@ -21,6 +21,12 @@ def _bh(p_values: list[float]) -> list[float]:
 
 
 def compare_groups(case_scores: list[float], control_scores: list[float], iterations: int, seed: int) -> dict:
+    if len(case_scores) < 2 or len(control_scores) < 2:
+        raise ValueError("Each group must contain at least two independent score observations.")
+    if iterations < 100 or iterations > 10_000:
+        raise ValueError("Use between 100 and 10,000 resampling iterations.")
+    if seed < 0:
+        raise ValueError("The random seed must be a non-negative integer.")
     case = np.asarray(case_scores, dtype=float)
     control = np.asarray(control_scores, dtype=float)
     if not np.isfinite(case).all() or not np.isfinite(control).all():
@@ -43,7 +49,8 @@ def compare_groups(case_scores: list[float], control_scores: list[float], iterat
     return {
         "analysis_id": str(uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "method": "two-sided permutation test of mean difference; percentile bootstrap confidence interval",
+        "method": "two-sided permutation test of mean difference under exchangeability; independent-group percentile bootstrap confidence interval",
+        "assumption": "Permutation p-value requires exchangeable observations under the null. The bootstrap treats observations as independent sampling units; repeated measures, related variants, and model-effect records are not biological replicates.",
         "case_n": int(case.size), "control_n": int(control.size),
         "case_mean": float(case.mean()), "control_mean": float(control.mean()),
         "mean_difference": observed, "cohens_d": effect, "empirical_p_value": p_value,
@@ -56,15 +63,25 @@ def compare_groups(case_scores: list[float], control_scores: list[float], iterat
 def gene_enrichment(genes: list[str], background: list[str], gene_sets: dict[str, list[str]]) -> dict:
     selected = {str(g).strip().upper() for g in genes if str(g).strip()}
     universe = {str(g).strip().upper() for g in background if str(g).strip()}
-    selected &= universe
-    if not selected or len(universe) < len(selected):
-        raise ValueError("The selected gene set must overlap the supplied background universe.")
+    if not selected:
+        raise ValueError("The selected gene list must contain at least one non-empty gene identifier.")
+    if len(universe) < 2:
+        raise ValueError("The background universe must contain at least two distinct gene identifiers.")
+    outside = selected - universe
+    if outside:
+        preview = ", ".join(sorted(outside)[:5])
+        raise ValueError(f"Every selected gene must occur in the stated background. Not found: {preview}.")
+    if not gene_sets:
+        raise ValueError("Provide at least one gene set for enrichment testing.")
     rows = []
     for name, members in gene_sets.items():
-        pathway = {str(g).strip().upper() for g in members if str(g).strip()} & universe
+        if not str(name).strip():
+            raise ValueError("Gene-set names must not be empty.")
+        supplied_pathway = {str(g).strip().upper() for g in members if str(g).strip()}
+        pathway = supplied_pathway & universe
         overlap = selected & pathway
         p = float(hypergeom.sf(len(overlap) - 1, len(universe), len(pathway), len(selected)))
-        rows.append({"gene_set": name, "overlap_n": len(overlap), "set_n_in_background": len(pathway), "selected_n": len(selected), "background_n": len(universe), "genes": sorted(overlap), "p_value": p})
+        rows.append({"gene_set": name, "overlap_n": len(overlap), "set_n_supplied": len(supplied_pathway), "set_n_in_background": len(pathway), "set_n_outside_background": len(supplied_pathway - universe), "selected_n": len(selected), "background_n": len(universe), "genes": sorted(overlap), "p_value": p})
     adjusted = _bh([row["p_value"] for row in rows]) if rows else []
     for row, q_value in zip(rows, adjusted):
         row["q_value_bh"] = q_value
