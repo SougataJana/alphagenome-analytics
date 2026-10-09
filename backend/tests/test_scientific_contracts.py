@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import sys
 import types
+import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -204,6 +205,12 @@ class StatisticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare_groups([1, float("nan")], [2, 3], 100, 0)
 
+    def test_permutation_p_value_agrees_with_exact_small_sample_reference(self):
+        result = compare_groups([1, 2], [3, 4], 10_000, 4)
+        # Six possible allocations of two observations to the case group; two
+        # are at least as extreme as the observed absolute mean difference.
+        self.assertAlmostEqual(result["empirical_p_value"], 2 / 6, delta=0.025)
+
     def test_enrichment_rejects_selected_genes_outside_background(self):
         with self.assertRaisesRegex(ValueError, "occur in the stated background"):
             gene_enrichment(["A", "outside"], ["A", "B"], {"set": ["A"]})
@@ -277,6 +284,53 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(result["result"]["genome"]["af_calculated"], 0.01)
         self.assertEqual(result["result"]["exome"]["af_calculated"], 0.01)
         self.assertIn("kept separate", result["note"])
+
+    def test_gwas_adapter_preserves_records_and_source(self):
+        response = httpx.Response(
+            200,
+            json={"_embedded": {"associations": [{"id": "association-1", "pvalue": 1e-8}]}},
+            request=httpx.Request("GET", "https://www.ebi.ac.uk/gwas/rest/api/v2/associations"),
+        )
+        with patch.object(self.service, "_get", return_value=response):
+            result = self.service.gwas_associations("rs123")
+        self.assertEqual(result["associations"][0]["id"], "association-1")
+        self.assertEqual(result["source"], "GWAS Catalog API v2")
+
+    def test_clinvar_adapter_returns_empty_records_without_inventing_assertions(self):
+        search = httpx.Response(
+            200, json={"esearchresult": {"idlist": []}},
+            request=httpx.Request("GET", "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"),
+        )
+        with patch.object(self.service, "_get", return_value=search):
+            result = self.service.clinvar("rs123")
+        self.assertEqual(result["records"], [])
+        self.assertIsNone(result["summary_url"])
+        self.assertEqual(result["source"], "NCBI ClinVar E-utilities")
+
+    def test_gtex_adapter_preserves_provider_payload_and_dataset(self):
+        response = httpx.Response(
+            200, json={"associations": [{"tissueSiteDetailId": "Lung", "pValue": 1e-5}]},
+            request=httpx.Request("GET", "https://gtexportal.org/api/v2/association/singleTissueEqtl"),
+        )
+        with patch.object(self.service, "_get", return_value=response):
+            result = self.service.gtex_eqtls("rs123")
+        self.assertEqual(result["dataset"], "gtex_v10")
+        self.assertEqual(result["associations"]["associations"][0]["tissueSiteDetailId"], "Lung")
+        self.assertEqual(result["source"], "GTEx Portal API v2")
+
+    def test_screen_adapter_separates_cres_from_prediction_scores(self):
+        response = httpx.Response(
+            200,
+            json={"data": {"cCRESCREENSearch": [{"chrom": "chr8", "start": 100, "len": 200, "info": {"accession": "EH38E1"}}]}},
+            request=httpx.Request("POST", "https://screen.api.wenglab.org/graphql"),
+        )
+        with patch.dict(os.environ, {"SCREEN_API_KEY": "test-key"}), patch(
+            "app.services.evidence.httpx.post", return_value=response
+        ):
+            result = self.service.encode_region("chr8", 100, 200)
+        self.assertEqual(result["ccres"][0]["info"]["accession"], "EH38E1")
+        self.assertEqual(result["source"], "SCREEN GraphQL API (ENCODE Registry of cCREs)")
+        self.assertNotIn("avi_score", result)
 
     def test_provider_failure_is_not_returned_as_an_empty_biological_result(self):
         with patch.object(self.service, "region", side_effect=EvidenceProviderError("Ensembl timed out")):
