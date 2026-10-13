@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import { AnalysisResult, buildAnalysisResult, isAnalysisResult, Variant, VariantPrediction } from "../lib/analysis";
 
 type Result = VariantPrediction;
@@ -10,18 +11,18 @@ type HistoryEntry = { analysis_id: string; created_at: string; analysis_type: st
 type EvidenceScoreRow = { variant: string; avi?: number; gwas_score?: number; eqtl_p?: number; gnomad_af?: number };
 type TrackOption = { ontology_term: string; label: string };
 type TrackOptionsResponse = { options: Record<string, TrackOption[]> };
-type DetailedTrackPayload = {
+type VisualizationProfile = "expression_chromatin" | "splicing" | "contact_maps";
+type AdvancedVisualizationPayload = {
   provider: string;
   provider_sdk_version?: string | null;
   output_kind: string;
-  modality: string;
+  profile: VisualizationProfile;
   ontology_term: string;
-  start_1based: number;
-  end_1based_inclusive: number;
-  variant_position: number;
-  downsampling: string;
-  tracks_truncated: boolean;
-  tracks: { name: string; biosample?: string | null; strand?: string | null; resolution_bp: number; reference: (number | null)[]; alternate: (number | null)[] }[];
+  modalities_requested: string[];
+  window_bp: number;
+  plot_svg_base64: string;
+  transcript_annotation?: string;
+  transcript_source?: string;
 };
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -141,50 +142,21 @@ function RegionTrack({ data }: { data: unknown }) {
   })}</div>;
 }
 
-function TrackPlot({ track, payload }: { track: DetailedTrackPayload["tracks"][number]; payload: DetailedTrackPayload }) {
-  const values = [...track.reference, ...track.alternate].filter((value): value is number => value !== null && Number.isFinite(value));
-  if (!values.length) return <div className="empty-state">No finite values returned for this track.</div>;
-  let min = Math.min(...values); let max = Math.max(...values);
-  if (min === max) { min -= 0.5; max += 0.5; }
-  const x = (index: number, length: number) => 52 + (index / Math.max(1, length - 1)) * 930;
-  const y = (value: number) => 18 + ((max - value) / (max - min)) * 132;
-  const lineSegments = (series: (number | null)[]) => {
-    const segments: string[] = [];
-    let current: string[] = [];
-    series.forEach((value, index) => {
-      if (value === null || !Number.isFinite(value)) {
-        if (current.length) segments.push(current.join(" "));
-        current = [];
-        return;
-      }
-      current.push(`${current.length ? "L" : "M"}${x(index, series.length).toFixed(1)},${y(value).toFixed(1)}`);
-    });
-    if (current.length) segments.push(current.join(" "));
-    return segments;
-  };
-  const variantX = 52 + ((payload.variant_position - payload.start_1based) / Math.max(1, payload.end_1based_inclusive - payload.start_1based)) * 930;
-  return <article className="signal-track-card">
-    <div className="signal-track-heading"><div><b>{track.name}</b><small>{track.biosample ?? payload.ontology_term}{track.strand ? ` · strand ${track.strand}` : ""} · {track.resolution_bp} bp resolution</small></div><div className="signal-legend"><span><i className="ref-swatch"/>REF</span><span><i className="alt-swatch"/>ALT</span></div></div>
-    <div className="signal-svg-wrap"><svg viewBox="0 0 1000 190" role="img" aria-label={`${track.name} AlphaGenome predicted reference and alternate signal`}>
-      <line x1="52" x2="982" y1="150" y2="150" className="signal-axis"/><line x1="52" x2="982" y1="18" y2="18" className="signal-gridline"/>
-      <line x1={variantX} x2={variantX} y1="12" y2="153" className="signal-variant-line"/>
-      {lineSegments(track.reference).map((d, index) => <path key={`ref-${index}`} d={d} className="signal-line-ref"/>)}{lineSegments(track.alternate).map((d, index) => <path key={`alt-${index}`} d={d} className="signal-line-alt"/>)}
-      <text x="4" y="22" className="signal-axis-label">{max.toPrecision(3)}</text><text x="4" y="153" className="signal-axis-label">{min.toPrecision(3)}</text>
-      <text x="52" y="176" className="signal-axis-label">{formatCoordinate(payload.start_1based)}</text><text x="982" y="176" textAnchor="end" className="signal-axis-label">{formatCoordinate(payload.end_1based_inclusive)}</text><text x={Math.max(60, Math.min(910, variantX + 6))} y="12" className="signal-variant-label">SNV</text>
-    </svg></div>
-  </article>;
-}
-
 function DetailedTracks({ variant, onNavigate }: { variant: Variant; onNavigate?: (view: View) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [options, setOptions] = useState<TrackOptionsResponse | null>(null);
-  const [modality, setModality] = useState("RNA_SEQ");
+  const [profile, setProfile] = useState<VisualizationProfile>("expression_chromatin");
   const [ontologyTerm, setOntologyTerm] = useState("");
-  const [payload, setPayload] = useState<DetailedTrackPayload | null>(null);
+  const [payload, setPayload] = useState<AdvancedVisualizationPayload | null>(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [loadingTracks, setLoadingTracks] = useState(false);
   const [error, setError] = useState("");
-  const trackOptions = options?.options?.[modality] ?? [];
+  const profileModalities: Record<VisualizationProfile, string[]> = {
+    expression_chromatin: ["RNA_SEQ", "CAGE", "ATAC", "DNASE"],
+    splicing: ["RNA_SEQ", "SPLICE_SITES", "SPLICE_SITE_USAGE", "SPLICE_JUNCTIONS"],
+    contact_maps: ["CONTACT_MAPS"],
+  };
+  const trackOptions = [...new Map(profileModalities[profile].flatMap((name) => options?.options?.[name] ?? []).map((option) => [option.ontology_term, option])).values()];
 
   async function openPanel() {
     setExpanded((open) => !open);
@@ -193,9 +165,8 @@ function DetailedTracks({ variant, onNavigate }: { variant: Variant; onNavigate?
     try {
       const data = await api<TrackOptionsResponse>("/api/v1/variants/track-options");
       setOptions(data);
-      const firstModality = Object.keys(data.options).find((key) => (data.options[key] ?? []).length > 0) ?? "RNA_SEQ";
-      setModality(firstModality);
-      setOntologyTerm(data.options[firstModality]?.[0]?.ontology_term ?? "");
+      const firstTerm = profileModalities.expression_chromatin.flatMap((name) => data.options[name] ?? [])[0]?.ontology_term ?? "";
+      setOntologyTerm(firstTerm);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not load AlphaGenome track options."); }
     finally { setLoadingOptions(false); }
   }
@@ -205,9 +176,9 @@ function DetailedTracks({ variant, onNavigate }: { variant: Variant; onNavigate?
     if (!ontologyTerm) { setError("Choose a tissue or biosample returned by AlphaGenome metadata."); return; }
     setLoadingTracks(true); setPayload(null); setError("");
     try {
-      const data = await api<DetailedTrackPayload>("/api/v1/variants/detailed-tracks", {
+      const data = await api<AdvancedVisualizationPayload>("/api/v1/variants/advanced-visualization", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...variant, ontology_term: ontologyTerm, modality }),
+        body: JSON.stringify({ ...variant, ontology_term: ontologyTerm, profile }),
       });
       setPayload(data);
     } catch (e) { setError(e instanceof Error ? e.message : "Detailed AlphaGenome prediction failed."); }
@@ -215,25 +186,25 @@ function DetailedTracks({ variant, onNavigate }: { variant: Variant; onNavigate?
   }
 
   return <section className="detailed-track-panel">
-    <div className="result-section-heading"><div><span className="score-label">Detailed AlphaGenome visualization</span><p>Optional on-demand REF/ALT prediction tracks. Atlas summary scores above remain the primary lookup result.</p></div><button type="button" onClick={openPanel}>{expanded ? "Hide track options" : "View detailed tracks →"}</button></div>
+    <div className="result-section-heading"><div><span className="score-label">Detailed AlphaGenome visualization</span><p>On-demand REF/ALT predictions rendered with AlphaGenome’s official plotting library. These are model outputs, not sample measurements or synthetic tracks; Atlas summary scores above are unchanged.</p></div><button type="button" onClick={openPanel}>{expanded ? "Hide visualization options" : "Build detailed visualization →"}</button></div>
     {expanded && <>
       {loadingOptions && <p className="result-note">Loading available modalities and biosamples from AlphaGenome metadata…</p>}
       {options && <form className="track-query-form" onSubmit={loadTracks}>
-        <label>Prediction modality<select value={modality} onChange={(event) => { setModality(event.target.value); setOntologyTerm(""); setPayload(null); }}>
-          {Object.entries(options.options).filter(([, choices]) => choices.length > 0).map(([key]) => <option key={key} value={key}>{key.replaceAll("_", " ")}</option>)}
+        <label>Visualization profile<select value={profile} onChange={(event) => { setProfile(event.target.value as VisualizationProfile); setOntologyTerm(""); setPayload(null); }}>
+          <option value="expression_chromatin">Expression + chromatin · RNA-seq, CAGE, ATAC, DNase</option><option value="splicing">Splicing · RNA-seq, splice sites, usage, junctions</option><option value="contact_maps">Contact maps · long-range interactions</option>
         </select></label>
         <label>Tissue / biosample<select value={ontologyTerm} onChange={(event) => { setOntologyTerm(event.target.value); setPayload(null); }}>
           <option value="">Choose a returned biosample</option>{trackOptions.map((option, index) => <option key={`${option.ontology_term}-${option.label}-${index}`} value={option.ontology_term}>{option.label} · {option.ontology_term}</option>)}
         </select></label>
-        <button className="primary-action" disabled={loadingTracks || !ontologyTerm}>{loadingTracks ? "Predicting tracks…" : "Generate REF/ALT tracks"}</button>
+        <button className="primary-action" disabled={loadingTracks || !ontologyTerm}>{loadingTracks ? "Predicting and plotting…" : "Generate model visualization"}</button>
       </form>}
       {error && <p className="feedback visible" role="status">{error}</p>}
       {payload && <>
-        <div className="scope-note"><b>On-demand AlphaGenome prediction · separate from Atlas</b><span>{payload.modality.replaceAll("_", " ")} · {payload.ontology_term} · GRCh38:{formatCoordinate(payload.start_1based)}–{formatCoordinate(payload.end_1based_inclusive)}</span><span>Each line is the mean predicted signal per display bin ({payload.downsampling}); track resolution is shown below. Red vertical line marks the submitted SNV.</span><span>SDK {payload.provider_sdk_version ?? "version unavailable"} · {payload.output_kind}</span></div>
-        {payload.tracks.map((track, index) => <TrackPlot key={`${track.name}-${index}`} track={track} payload={payload}/>)}
-        {payload.tracks_truncated && <p className="result-note">AlphaGenome returned more tracks; showing the first eight in provider metadata order.</p>}
-        <div className="action-row track-actions"><button type="button" className="primary-action" onClick={() => download(`aga-${variant.chromosome}-${variant.position}-${payload.modality.toLowerCase()}-tracks.json`, payload)}>Download plotted track data</button><button type="button" className="primary-action secondary-action" onClick={() => onNavigate?.("region")}>Open separate gene / cCRE annotations →</button></div>
-        <p className="result-note">Gene and regulatory annotations are retrieved separately from Ensembl or SCREEN in Region; they are not part of this AlphaGenome prediction response. Motif exploration is available in the official Atlas link above.</p>
+        <div className="scope-note"><b>On-demand AlphaGenome prediction · separate from Atlas summary</b><span>{payload.profile.replaceAll("_", " + ")} · {payload.ontology_term} · GRCh38 · {formatCoordinate(payload.window_bp)} bp display window</span><span>Tracks are rendered from actual API REF/ALT outputs using the official AlphaGenome visualization components. Requested outputs: {payload.modalities_requested.join(", ")}.</span><span>SDK {payload.provider_sdk_version ?? "version unavailable"} · {payload.output_kind}</span></div>
+        <div className="official-plot-frame"><Image unoptimized width={1200} height={900} src={`data:image/svg+xml;base64,${payload.plot_svg_base64}`} alt={`AlphaGenome ${payload.profile.replaceAll("_", " and ")} REF and ALT prediction visualization for ${payload.ontology_term}`}/></div>
+        <p className="result-note">Transcript track: {payload.transcript_annotation ?? "status unavailable"}{payload.transcript_source && <> · <a href={payload.transcript_source} target="_blank" rel="noreferrer">GENCODE v46 GRCh38 source ↗</a></>}</p>
+        <div className="action-row track-actions"><button type="button" className="primary-action" onClick={() => { const link = document.createElement("a"); link.href = `data:image/svg+xml;base64,${payload.plot_svg_base64}`; link.download = `aga-${variant.chromosome}-${variant.position}-${payload.profile}.svg`; link.click(); }}>Download SVG visualization</button><button type="button" className="primary-action secondary-action" onClick={() => onNavigate?.("region")}>Open separate gene / cCRE annotations →</button></div>
+        <p className="result-note">Gene annotations and regulatory cCRE records remain a separate Ensembl/SCREEN evidence view. The official Atlas is linked above for its interactive site and motif views.</p>
       </>}
     </>}
   </section>;

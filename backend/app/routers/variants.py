@@ -13,6 +13,7 @@ from app.services.alphagenome import (
 from app.services.alphagenome_tracks import (
     TrackPredictionError,
     get_track_options,
+    predict_advanced_visualization,
     predict_variant_tracks,
 )
 from app.services import jobs
@@ -86,6 +87,11 @@ class DetailedTracksRequest(VariantRequest):
     ]
 
 
+class AdvancedVisualizationRequest(VariantRequest):
+    ontology_term: str = Field(min_length=1, max_length=80)
+    profile: Literal["expression_chromatin", "splicing", "contact_maps"]
+
+
 @router.post("/variants/analyze", response_model=VariantAnalysisResult)
 def analyze_variant(request: VariantRequest) -> VariantAnalysisResult:
     try:
@@ -123,6 +129,14 @@ def track_options() -> dict:
 def detailed_variant_tracks(request: DetailedTracksRequest) -> dict:
     try:
         return predict_variant_tracks(request, request.ontology_term, request.modality)
+    except TrackPredictionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/variants/advanced-visualization")
+def advanced_variant_visualization(request: AdvancedVisualizationRequest) -> dict:
+    try:
+        return predict_advanced_visualization(request, request.ontology_term, request.profile)
     except TrackPredictionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
