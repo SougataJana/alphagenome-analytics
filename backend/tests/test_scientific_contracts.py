@@ -93,17 +93,6 @@ class ReferenceAlleleTests(unittest.TestCase):
         service.verify(self.variant(chromosome="chrM", position=1))
         self.assertIn("/MT:1..1:1", client.get.call_args.args[0])
 
-    def test_alpha_query_is_not_called_when_reference_check_fails(self):
-        reference = Mock()
-        reference.verify.side_effect = ReferenceValidationError("REF mismatch", 422)
-        service = AlphaGenomeService(reference_service=reference)
-        with patch("app.services.alphagenome._atlas_client") as atlas_client:
-            from app.services.alphagenome import AlphaGenomeRequestError
-            with self.assertRaises(AlphaGenomeRequestError) as error:
-                service.analyze(self.variant())
-        self.assertEqual(error.exception.status_code, 422)
-        atlas_client.assert_not_called()
-
     def test_effect_quantiles_preserve_signed_direction(self):
         effect = ModalityEffect(
             modality="RNA_SEQ", raw_score=-1.36, quantile_score=-0.9999998
@@ -169,11 +158,7 @@ class AtlasResponsePreservationTests(unittest.TestCase):
         parent.data = data
         data.genome = genome
         variant = VariantRequest(chromosome="chr22", position=36_201_698, reference="A", alternate="C")
-        service = AlphaGenomeService(reference_service=Mock(verify=Mock(return_value={
-            "status": "verified", "assembly": "GRCh38", "source": "Ensembl REST sequence/region",
-            "source_url": "https://rest.ensembl.org/sequence/region/human/22:36201698..36201698:1",
-            "requested_reference": "A", "observed_reference": "A", "checked_at": "2026-10-09T00:00:00+00:00",
-        })))
+        service = AlphaGenomeService()
         with patch("app.services.alphagenome._atlas_client", return_value=client), patch.dict(
             sys.modules,
             {"alphagenome": parent, "alphagenome.data": data, "alphagenome.data.genome": genome},
@@ -182,7 +167,8 @@ class AtlasResponsePreservationTests(unittest.TestCase):
 
         self.assertEqual(result.avi_score, 1.5548)
         self.assertAlmostEqual(result.avi_quantile, 0.99894)
-        self.assertEqual(result.reference_validation.observed_reference, "A")
+        self.assertEqual(result.reference_validation.status, "not_performed")
+        self.assertIsNone(result.reference_validation.observed_reference)
         self.assertEqual(result.effects[0].quantile_score, -0.99998)
         self.assertEqual(result.effects[0].gene, "TP53")
         self.assertIsNone(result.provider_model_version)

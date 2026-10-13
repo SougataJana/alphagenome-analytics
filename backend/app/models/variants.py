@@ -79,13 +79,14 @@ class ModalityEffect(BaseModel):
 
 
 class ReferenceValidation(BaseModel):
-    status: Literal["verified"]
+    status: Literal["verified", "not_performed", "mismatch", "unavailable"]
     assembly: Literal["GRCh38"]
-    source: str
-    source_url: str
+    source: str | None = None
+    source_url: str | None = None
     requested_reference: str = Field(pattern=r"^[ACGT]$")
-    observed_reference: str = Field(pattern=r"^[ACGT]$")
-    checked_at: datetime
+    observed_reference: str | None = Field(default=None, pattern=r"^[ACGT]$")
+    checked_at: datetime | None = None
+    message: str | None = None
 
 
 class VariantAnalysisResult(BaseModel):

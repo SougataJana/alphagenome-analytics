@@ -27,13 +27,14 @@ export type VariantPrediction = {
   requested_scorers?: string[];
   variant?: Variant;
   reference_validation?: {
-    status: "verified";
+    status: "verified" | "not_performed" | "mismatch" | "unavailable";
     assembly: "GRCh38";
-    source: string;
-    source_url: string;
+    source?: string | null;
+    source_url?: string | null;
     requested_reference: string;
-    observed_reference: string;
-    checked_at: string;
+    observed_reference?: string | null;
+    checked_at?: string | null;
+    message?: string | null;
   };
   avi_score?: number;
   avi_quantile?: number | null;

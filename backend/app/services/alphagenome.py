@@ -11,10 +11,10 @@ from dotenv import load_dotenv
 from app.models.variants import (
     FeatureAttribution,
     ModalityEffect,
+    ReferenceValidation,
     VariantAnalysisResult,
     VariantRequest,
 )
-from app.services.reference import ReferenceGenomeService, ReferenceValidationError
 
 logger = logging.getLogger(__name__)
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -97,15 +97,7 @@ def _atlas_client():
 class AlphaGenomeService:
     """Fetch normalized single-SNV scores from the official AlphaGenome Atlas API."""
 
-    def __init__(self, reference_service: ReferenceGenomeService | None = None):
-        self.reference_service = reference_service or ReferenceGenomeService()
-
     def analyze(self, variant: VariantRequest) -> VariantAnalysisResult:
-        try:
-            reference_validation = self.reference_service.verify(variant)
-        except ReferenceValidationError as exc:
-            raise AlphaGenomeRequestError(str(exc), exc.status_code) from exc
-
         from alphagenome.data import genome
 
         client = _atlas_client()
@@ -238,6 +230,19 @@ class AlphaGenomeService:
             for scorer in ("RNA_SEQ", "SPLICE_SITES", "ATAC")
             for effect in effects_by_scorer[scorer][:MAX_RETURNED_EFFECTS]
         ]
+
+        # Atlas is the prediction provider. Do not put an unrelated reference
+        # service in the critical path; state clearly that AGA did not perform
+        # an independent REF check for this Atlas response.
+        reference_validation = ReferenceValidation(
+            status="not_performed",
+            assembly="GRCh38",
+            requested_reference=variant.reference,
+            message=(
+                "AGA queried AlphaGenome Atlas directly. The REF allele was not "
+                "independently verified by AGA."
+            ),
+        )
 
         return VariantAnalysisResult(
             status="complete",
