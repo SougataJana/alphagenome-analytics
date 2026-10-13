@@ -42,6 +42,7 @@ GENCODE_FEATHER_URL = (
     "https://storage.googleapis.com/alphagenome/reference/gencode/"
     "hg38/gencode.v46.annotation.gtf.gz.feather"
 )
+ENABLE_GENCODE_TRANSCRIPTS_ENV = "AGA_ENABLE_GENCODE_TRANSCRIPTS"
 
 
 class TrackPredictionError(Exception):
@@ -367,16 +368,24 @@ def _render_advanced_plot(output, variant, profile: str, ontology_term: str) -> 
         alternate_bases=variant.alternate,
     )
     display_interval = genome_variant.reference_interval.resize(window)
-    transcript_status = "included"
-    try:
-        transcripts = _transcript_extractor().extract(display_interval)
-        if transcripts:
-            components.insert(0, plot_components.TranscriptAnnotation(transcripts))
-        else:
-            transcript_status = "no protein-coding, support-level-1 transcripts overlap this display window"
-    except Exception:
-        logger.exception("Could not load the GENCODE transcript annotations for plotting.")
-        transcript_status = "GENCODE annotation unavailable; prediction tracks are still shown"
+    # Loading the full GENCODE Feather reference can use several hundred MB.
+    # Keep it opt-in because the public Render free instance has a tight memory limit.
+    include_transcripts = os.getenv(ENABLE_GENCODE_TRANSCRIPTS_ENV, "false").lower() in {
+        "1", "true", "yes"
+    }
+    if include_transcripts:
+        transcript_status = "included"
+        try:
+            transcripts = _transcript_extractor().extract(display_interval)
+            if transcripts:
+                components.insert(0, plot_components.TranscriptAnnotation(transcripts))
+            else:
+                transcript_status = "no protein-coding, support-level-1 transcripts overlap this display window"
+        except Exception:
+            logger.exception("Could not load the GENCODE transcript annotations for plotting.")
+            transcript_status = "GENCODE annotation unavailable; prediction tracks are still shown"
+    else:
+        transcript_status = "omitted to keep the public backend within its memory limit"
     figure = plot_components.plot(
         components,
         interval=display_interval,
@@ -432,7 +441,7 @@ def predict_advanced_visualization(variant: VariantRequest, ontology_term: str, 
             "window_bp": CONTACT_WINDOW_BP if profile == "contact_maps" else PLOT_WINDOW_BP,
             "plot_svg_base64": plot_svg,
             "transcript_annotation": transcript_status,
-            "transcript_source": GENCODE_FEATHER_URL,
+            "transcript_source": GENCODE_FEATHER_URL if transcript_status != "omitted to keep the public backend within its memory limit" else None,
         }
     except TrackPredictionError:
         raise

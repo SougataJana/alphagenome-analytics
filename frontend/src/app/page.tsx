@@ -25,6 +25,49 @@ type AdvancedVisualizationPayload = {
   transcript_source?: string;
 };
 
+function AtlasEffectVisualization({ effects, truncated }: { effects: NonNullable<Result["effects"]>; truncated: boolean }) {
+  const modalities = [...new Set(effects.map((effect) => effect.modality).filter(Boolean))];
+  const [selectedModality, setSelectedModality] = useState(modalities[0] ?? "");
+  const activeModality = modalities.includes(selectedModality) ? selectedModality : modalities[0] ?? "";
+  const rows = effects
+    .filter((effect) => effect.modality === activeModality && typeof effect.quantile_score === "number" && Number.isFinite(effect.quantile_score))
+    .sort((a, b) => Math.abs(b.quantile_score ?? 0) - Math.abs(a.quantile_score ?? 0))
+    .slice(0, 12);
+  const maxAbs = Math.max(0.05, ...rows.map((row) => Math.abs(row.quantile_score ?? 0)));
+  const rowHeight = 35;
+  const chartHeight = Math.max(160, rows.length * rowHeight + 48);
+  const axisX = 570;
+  const halfWidth = 200;
+
+  if (!effects.length) return null;
+  return <section className="atlas-effect-visualization">
+    <div className="result-section-heading"><div><span className="score-label">Atlas effect profile</span><p>Interactive view of signed quantile values returned by this Atlas query. Values are directional ranks, not probabilities, clinical classifications, or measurements.</p></div></div>
+    <div className="atlas-chart-controls"><label>Atlas scorer<select value={activeModality} onChange={(event) => setSelectedModality(event.target.value)}>{modalities.map((modality) => <option key={modality} value={modality}>{modality.replaceAll("_", " ")}</option>)}</select></label><span>{rows.length} of {effects.filter((effect) => effect.modality === activeModality).length} displayed records</span></div>
+    {rows.length ? <div className="atlas-quantile-chart-wrap"><svg className="atlas-quantile-chart" viewBox={`0 0 920 ${chartHeight}`} role="img" aria-label={`Top Atlas signed quantile effect records for ${activeModality}`}>
+      <line x1={axisX} y1="24" x2={axisX} y2={chartHeight - 16} className="atlas-chart-zero" />
+      <text x={axisX - halfWidth} y="16" textAnchor="start" className="atlas-chart-axis-label">−{maxAbs.toFixed(2)}</text>
+      <text x={axisX} y="16" textAnchor="middle" className="atlas-chart-axis-label">0</text>
+      <text x={axisX + halfWidth} y="16" textAnchor="end" className="atlas-chart-axis-label">+{maxAbs.toFixed(2)}</text>
+      {rows.map((effect, index) => {
+        const value = effect.quantile_score ?? 0;
+        const width = Math.abs(value) / maxAbs * halfWidth;
+        const label = [effect.gene, effect.tissue, effect.feature].filter(Boolean).join(" · ") || `Atlas record ${index + 1}`;
+        const x = value < 0 ? axisX - width : axisX;
+        const y = 31 + index * rowHeight;
+        return <g key={`${effect.modality}-${label}-${index}`}>
+          <title>{`${label}: signed quantile ${value.toFixed(4)}; raw score ${effect.raw_score}`}</title>
+          <text x="4" y={y + 16} className="atlas-chart-row-label">{label.length > 55 ? `${label.slice(0, 52)}…` : label}</text>
+          <line x1={axisX - halfWidth} y1={y + 22} x2={axisX + halfWidth} y2={y + 22} className="atlas-chart-track" />
+          <rect x={x} y={y + 7} width={Math.max(width, 1)} height="18" rx="4" className={value < 0 ? "atlas-chart-bar negative" : "atlas-chart-bar"} />
+          <text x="912" y={y + 20} textAnchor="end" className="atlas-chart-value">{value.toFixed(3)}</text>
+        </g>;
+      })}
+    </svg></div> : <div className="empty-state">This Atlas scorer returned no signed quantiles to plot. Raw values remain available in the effects table.</div>}
+    {truncated && <p className="result-note">Atlas effect records in the standard response are capped at 200 per scorer. This plot shows up to 12 of those returned records; it does not represent omitted records.</p>}
+    <p className="result-note">Positive and negative values show the direction of the Atlas quantile signal only. They do not imply benefit, harm, or causality.</p>
+  </section>;
+}
+
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const batchLimit = Number(process.env.NEXT_PUBLIC_MAX_BATCH_SIZE ?? 100);
 const historyStorageKey = "aga-local-analysis-history-v1";
@@ -103,6 +146,7 @@ function ResultCard({ result, onNavigate }: { result: Result; onNavigate?: (view
       <div className="result-count-card"><strong>{tissueCount}</strong><span>tissues / contexts</span></div>
     </div>
     {byModality.length > 0 && <section className="result-effects"><div className="result-section-heading"><div><span className="score-label">Returned effects</span><p>Largest absolute raw score within each modality. Scores across modalities may use different scales.</p></div><button type="button" onClick={() => onNavigate?.("effects")}>View all effects →</button></div><div className="effect-summary-grid">{byModality.map(([modality, group]) => <article className="effect-summary-card" key={modality}><span>{modality.replace(/_/g, " ")}</span><strong>{group.strongest.raw_score.toPrecision(4)}</strong><small>{group.count} records · {group.strongest.feature ?? group.strongest.gene ?? group.strongest.tissue ?? "feature label unavailable"}</small></article>)}</div></section>}
+    <AtlasEffectVisualization effects={effects} truncated={Boolean(result.effects_truncated)} />
     {importance.length > 0 && <div className="features"><span className="score-label">Feature attribution · raw value</span>{importance.slice(0, 30).map((item) => <div className="attribution-row" key={item.feature}><div className="attribution-label"><span>{item.feature.replace(/_/g, " ")}</span><b>{item.value.toFixed(4)}</b></div><div className="attribution-track"><i style={{ width: `${Math.max(1, Math.abs(item.value) / max * 100)}%` }} /></div></div>)}</div>}
     <div className="result-shortcuts"><button type="button" onClick={() => onNavigate?.("genes")}>Variant → gene</button><button type="button" onClick={() => onNavigate?.("tissues")}>Tissues</button><button type="button" onClick={() => onNavigate?.("evidence")}>Evidence</button><button type="button" onClick={() => onNavigate?.("reports")}>Reports</button>{result.variant && <a className="atlas-link" href={`https://alphagenome.google/atlas?q=${encodeURIComponent(`${result.variant.chromosome}:${result.variant.position}:${result.variant.reference}>${result.variant.alternate}`)}&m=variant`} target="_blank" rel="noreferrer">Open in AlphaGenome Atlas ↗</a>}</div>
     <p className="result-note">Prediction for research prioritization. It is not a clinical interpretation.</p>
@@ -194,7 +238,7 @@ function DetailedTracks({ variant, onNavigate }: { variant: Variant; onNavigate?
   }
 
   return <section className="detailed-track-panel">
-    <div className="result-section-heading"><div><span className="score-label">Detailed AlphaGenome visualization</span><p>On-demand REF/ALT predictions rendered with AlphaGenome’s official plotting library. These are model outputs, not sample measurements or synthetic tracks; Atlas summary scores above are unchanged.</p></div><button type="button" onClick={openPanel}>{expanded ? "Hide visualization options" : "Build detailed visualization →"}</button></div>
+    <div className="result-section-heading"><div><span className="score-label">Additional live model tracks</span><p>Optional second request to AlphaGenome’s prediction API, rendered with its official plotting library. This is separate from the Atlas query and the Atlas-derived score plot above.</p></div><button type="button" onClick={openPanel}>{expanded ? "Hide visualization options" : "Build live prediction tracks →"}</button></div>
     {expanded && <>
       {loadingOptions && <p className="result-note">Loading available modalities and biosamples from AlphaGenome metadata…</p>}
       {options && <form className="track-query-form" onSubmit={loadTracks}>
