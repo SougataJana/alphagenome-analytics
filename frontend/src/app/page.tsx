@@ -55,7 +55,15 @@ function parseEvidenceScores(text: string): EvidenceScoreRow[] {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, init);
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}${path}`, init);
+  } catch (error) {
+    const reason = error instanceof Error ? ` (${error.message})` : "";
+    throw new Error(
+      `The browser could not reach the API at ${apiBase}. Check that the backend is awake and that this site's origin is included in CORS_ORIGINS.${reason}`,
+    );
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail ?? `Request failed (${response.status}).`);
   return data as T;
