@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
@@ -8,6 +9,11 @@ from app.services.alphagenome import (
     AlphaGenomeNotConfigured,
     AlphaGenomeRequestError,
     AlphaGenomeService,
+)
+from app.services.alphagenome_tracks import (
+    TrackPredictionError,
+    get_track_options,
+    predict_variant_tracks,
 )
 from app.services import jobs
 from app.services.jobs import JobCapacityError
@@ -66,6 +72,20 @@ class VariantGeneRequest(VariantRequest):
     window_bp: int = Field(default=100_000, ge=1, le=1_000_000)
 
 
+class DetailedTracksRequest(VariantRequest):
+    ontology_term: str = Field(min_length=1, max_length=80)
+    modality: Literal[
+        "RNA_SEQ",
+        "CAGE",
+        "ATAC",
+        "DNASE",
+        "CHIP_HISTONE",
+        "CHIP_TF",
+        "SPLICE_SITES",
+        "SPLICE_SITE_USAGE",
+    ]
+
+
 @router.post("/variants/analyze", response_model=VariantAnalysisResult)
 def analyze_variant(request: VariantRequest) -> VariantAnalysisResult:
     try:
@@ -89,6 +109,22 @@ def analyze_variant(request: VariantRequest) -> VariantAnalysisResult:
         result.model_dump(mode="json"),
     )
     return result
+
+
+@router.get("/variants/track-options")
+def track_options() -> dict:
+    try:
+        return get_track_options()
+    except TrackPredictionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/variants/detailed-tracks")
+def detailed_variant_tracks(request: DetailedTracksRequest) -> dict:
+    try:
+        return predict_variant_tracks(request, request.ontology_term, request.modality)
+    except TrackPredictionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/variants/analyze-batch", status_code=202)

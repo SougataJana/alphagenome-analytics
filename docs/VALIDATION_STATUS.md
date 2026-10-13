@@ -15,11 +15,12 @@ This is an implementation-validation record, not a biological performance claim.
 | Atlas website parity | Pending | No Atlas UI values have been captured or compared. See `ATLAS_PARITY_CHECKLIST.md`. |
 | Biological benchmark or predictive performance | Pending | No curated variant benchmark, ClinVar evaluation, or external user evaluation is included. |
 | Frontend production build | Passed | `npm run build` completed successfully. |
+| Optional detailed AlphaGenome track visualization | Implemented; not yet verified | New on-demand `predict_variant` metadata/track endpoints and REF/ALT plotting were added after the last recorded test/build run. API compatibility, live provider behavior, plot coordinate handling, and the deployed Vercel-to-Render flow still need verification. This is separate from Atlas parity. |
 
 ## Previous automated checks
 
 - Before the 2026-10-13 workflow change, `python -m unittest discover -s tests -v` in `backend/` reported 34 passing tests.
 - Before the 2026-10-13 workflow change, `npm run build` in `frontend/` passed.
-- The test suite and frontend build have not been rerun after the workflow change.
+- The test suite and frontend build have not been rerun after the latest workflow and detailed-track visualization changes.
 
 The live Ensembl-to-Atlas probe could not be completed from the restricted command environment because outbound DNS/network access was unavailable before the Atlas call. The Atlas website also requires the account holder to complete a Google verification step in the browser. Do not describe UI parity, live provider connectivity, or biological validity as passed until those checks are performed and the case log is filled with observed values.

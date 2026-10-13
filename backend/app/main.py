@@ -40,6 +40,8 @@ def _rate_rule(method: str, path: str) -> tuple[str, int, int] | None:
         return "single-variant", 12, 60
     if method == "POST" and path == "/api/v1/variants/analyze-batch":
         return "batch", 2, 60
+    if method == "POST" and path == "/api/v1/variants/detailed-tracks":
+        return "detailed-tracks", 2, 60
     if method == "POST" and path.startswith("/api/v1/statistics/"):
         return "statistics", 10, 60
     if path.startswith("/api/v1/"):

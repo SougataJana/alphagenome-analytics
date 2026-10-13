@@ -15,6 +15,7 @@ This document describes what the software computes and the limits on scientific 
 - Effects are sorted by absolute raw score within each scorer and capped at 200 rows per scorer in the standard result. The response reports original totals and whether any scorer was truncated. The complete SDK-decoded matrices, metadata, and quantile layers are retained separately and retrievable by analysis ID when persistence is enabled. This ordering is a display choice, not a cross-scorer ranking; raw scores from different scorers may not be comparable.
 - Atlas does not expose a model version in the response used by this application. The manifest records that as unavailable instead of inventing a value. The installed SDK version and requested scorer names are recorded where available.
 - Prediction labels, feature attributions, and proximity do not establish mechanism or causal target genes.
+- The optional detailed-track panel makes a separate AlphaGenome `predict_variant` request only after the user selects one available output modality and biosample. It plots returned REF and ALT signals in a 50 kb display window around the SNV, cropping the model's 1 Mb input context and mean-aggregating the displayed bins. The panel records modality, biosample ontology term, SDK version, track resolution, and downsampling description. These on-demand track predictions are not the precomputed Atlas scores and do not replace the Atlas result. The official Atlas is linked for its motif and interactive exploration views.
 
 ## Evidence sources
 
@@ -32,6 +33,7 @@ External lookups are run only when requested. Each response should retain its pr
 - Variant-to-gene scores are fixed equal-weight heuristics combining linear distance decay and the maximum absolute signed RNA_SEQ quantile per Ensembl-mapped gene. The selected signed quantile is retained to show direction. Missing RNA_SEQ support contributes zero under fixed weights; effect-row counts are context only. Unmapped effect labels are shown without rank or score, so missing distance cannot increase their score. The linear distance window and weighting are not empirically calibrated. Scores are dimensionless ranking values, not probabilities, and do not demonstrate causality.
 - Tissue summaries and tissue-to-tissue comparisons describe returned model-effect rows. They do not run a hypothesis test, calculate a confidence interval, or treat those rows as independent biological replicates.
 - Region displays locate the selected coordinate and show annotations returned by the selected provider. A coordinate line by itself is not an annotation track.
+- Detailed signal plots use returned AlphaGenome values only. Ensembl gene and SCREEN cCRE annotations are retrieved separately in Region and remain visibly labeled as external annotations.
 
 ## Statistics
 
