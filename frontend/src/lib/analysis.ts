@@ -149,7 +149,9 @@ export function buildAnalysisResult(input: BuildAnalysisInput): AnalysisResult {
       })),
         ...[...new Map(input.predictions.flatMap((prediction) => {
           const check = prediction.reference_validation;
-          return check ? [[check.source, { name: check.source, url: check.source_url, version: check.assembly }] as const] : [];
+          return check?.source
+            ? [[check.source, { name: check.source, url: check.source_url ?? undefined, version: check.assembly }] as const]
+            : [];
         })).values()],
         ...evidence.map((item) => ({ name: item.provider, url: item.source_url })),
       ],
